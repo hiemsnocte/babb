@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>오늘의 급식 메뉴</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f4f2ee;
+        --card: #fff;
+        --text: #1a1a1a;
+        --muted: #5c5c5c;
+        --accent: #2d6a4f;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #121412;
+          --card: #1e221f;
+          --text: #eef1ed;
+          --muted: #a3aca4;
+          --accent: #95d5b2;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: 'IBM Plex Sans KR', system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 1.5rem 1rem 2rem;
+      }
+      header {
+        text-align: center;
+        margin-bottom: 1.25rem;
+      }
+      h1 {
+        font-size: 1.35rem;
+        font-weight: 600;
+        margin: 0 0 0.35rem;
+        letter-spacing: -0.02em;
+      }
+      .sub {
+        font-size: 0.875rem;
+        color: var(--muted);
+      }
+      .card {
+        width: 100%;
+        max-width: 520px;
+        background: var(--card);
+        border-radius: 12px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+        overflow: hidden;
+        border: 1px solid rgba(0, 0, 0, 0.06);
+      }
+      .img-wrap {
+        position: relative;
+        aspect-ratio: 4 / 3;
+        background: #e8ebe8;
+      }
+      .img-wrap img {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+      }
+      .state {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+        text-align: center;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+      .state[hidden] {
+        display: none !important;
+      }
+      footer {
+        margin-top: 1.25rem;
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      .date-badge {
+        display: inline-block;
+        margin-top: 0.75rem;
+        padding: 0.25rem 0.65rem;
+        font-size: 0.8rem;
+        border-radius: 999px;
+        background: rgba(45, 106, 79, 0.12);
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>오늘의 급식 메뉴</h1>
+      <p class="sub">Firestore에서 최신 정보를 불러옵니다.</p>
+    </header>
+
+    <main class="card">
+      <div class="img-wrap" id="img-wrap">
+        <div class="state" id="loading">불러오는 중…</div>
+        <div class="state" id="error" hidden></div>
+        <img id="menu-img" alt="오늘의 메뉴" hidden />
+      </div>
+    </main>
+
+    <p class="date-badge" id="date-line" hidden></p>
+    <p class="sub" id="updated-line" hidden style="margin-top: 0.5rem"></p>
+    <footer>babb · GitHub Pages</footer>
+
+    <script type="module" src="./script.js"></script>
+  </body>
+</html>
