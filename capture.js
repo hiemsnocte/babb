@@ -7,17 +7,122 @@ const simpleGit = require('simple-git');
 const { initializeApp } = require('firebase/app');
 const { getFirestore, doc, setDoc, serverTimestamp } = require('firebase/firestore');
 
-/** GitHub: hiemsnocte/babb, main — menu_today.png 강제 푸시 */
+/** GitHub: hiemsnocte/babb, main — 메뉴 이미지들을 강제 푸시(스냅샷) */
 const GITHUB_OWNER = 'hiemsnocte';
 const GITHUB_REPO = 'babb';
 const GITHUB_BRANCH = 'main';
-const MENU_RAW_URL =
-  'https://raw.githubusercontent.com/hiemsnocte/babb/main/menu_today.png';
 const FIRESTORE_MENU_DOC_ID = 'current';
 
-/** 캐시 버스팅: https://.../menu_today.png?t=[현재시간(ms)] */
-function menuImageUrlWithCacheBust() {
-  return `${MENU_RAW_URL}?t=${new Date().getTime()}`;
+// 식당은 고정 순서: 벽산더이룸 → 더이츠푸드 → 봄봄
+const RESTAURANTS = [
+  {
+    id: 'beoksan',
+    name: '벽산더이룸',
+    profileUrl: 'http://pf.kakao.com/_xdLzxgG',
+    imageFileName: 'menu_beoksan.png',
+    type: 'kakao',
+  },
+  {
+    id: 'theeats',
+    name: '더이츠푸드',
+    profileUrl: 'https://pf.kakao.com/_xeVwxnn',
+    imageFileName: 'menu_theeats.png',
+    type: 'kakao',
+  },
+  {
+    id: 'bombom',
+    name: '봄봄',
+    profileUrl:
+      'https://map.naver.com/p/search/%EA%B5%AC%EB%94%94%20%EB%B4%84%EB%B4%84/place/2096511528?placePath=?abtExp=NEW-PLACE-SEARCH%3A1&bk_query=%EA%B5%AC%EB%94%94%20%EB%B4%84%EB%B4%84&entry=pll&from=nx&fromNxList=true&searchType=place&c=15.00,0,0,0,dh',
+    imageFileName: 'menu_bombom.png',
+    type: 'naverMap',
+  },
+];
+
+function rawGithubFileUrl(fileName) {
+  return `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/${fileName}`;
+}
+
+/** 캐시 버스팅: https://.../file.png?t=[현재시간(ms)] */
+function withCacheBust(url) {
+  return `${url}?t=${new Date().getTime()}`;
+}
+
+async function captureKakaoProfileMenu(page, url, imageFileName) {
+  await page.goto(url, { waitUntil: 'load' });
+  await page.waitForSelector('div.item_profile_head button.btn_thumb', {
+    timeout: 60000,
+  });
+  await page.click('div.item_profile_head button.btn_thumb');
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+  await page.screenshot({ path: imageFileName, fullPage: true });
+}
+
+function pickFrameByUrl(page, predicate) {
+  return page.frames().find((f) => {
+    try {
+      return predicate(f.url());
+    } catch {
+      return false;
+    }
+  });
+}
+
+async function waitForFrame(page, predicate, timeoutMs = 60000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const f = pickFrameByUrl(page, predicate);
+    if (f) return f;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error('네이버 지도 프레임(entryIframe)을 찾지 못했습니다.');
+}
+
+async function captureNaverMapNews(page, url, imageFileName) {
+  await page.goto(url, { waitUntil: 'load' });
+
+  // 네이버 지도 place 상세는 보통 iframe#entryIframe 안에서 렌더링됩니다.
+  const entryIframe = await page.waitForSelector('iframe#entryIframe', {
+    timeout: 60000,
+  });
+  const frame = await entryIframe.contentFrame();
+  if (!frame) throw new Error('네이버 지도 entryIframe 프레임을 얻지 못했습니다.');
+
+  // "소식" 탭 클릭
+  // Puppeteer는 text="..." 셀렉터를 지원하지 않으므로 XPath로 텍스트를 찾습니다.
+  const newsXPath =
+    "//*[self::a or self::button][contains(normalize-space(.), '소식')]";
+  const newsElHandle = await frame.waitForFunction(
+    (xpath) => {
+      const r = document.evaluate(
+        xpath,
+        document,
+        null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE,
+        null,
+      );
+      return r.singleNodeValue || null;
+    },
+    { timeout: 60000 },
+    newsXPath,
+  );
+  const newsEl = await newsElHandle.asElement();
+  if (!newsEl) throw new Error('소식 탭 요소를 찾지 못했습니다.');
+  await newsEl.click();
+
+  // 화면 전환 대기 (요청사항: 10초 정도)
+  await new Promise((r) => setTimeout(r, 10000));
+
+  // <div class="Hqj1R"> 안의 <div class="zmCWt"> (업로드된 메뉴사진 버튼) 클릭
+  const menuButtonSelector = 'div.Hqj1R div.zmCWt';
+  await frame.waitForSelector(menuButtonSelector, { timeout: 60000 });
+  const menuButton = await frame.$(menuButtonSelector);
+  if (!menuButton) throw new Error('메뉴 사진 버튼(zmCWt)을 찾지 못했습니다.');
+  await menuButton.click();
+
+  // 클릭 후 화면이 바뀔 시간을 확보 (요청사항: 10초)
+  await new Promise((r) => setTimeout(r, 10000));
+  await page.screenshot({ path: imageFileName, fullPage: true });
 }
 
 function loadFirebaseConfig() {
@@ -109,7 +214,14 @@ async function ensureClone(remoteUrl, repoPath) {
   await simpleGit().clone(remoteUrl, repoPath);
 }
 
-async function gitPushSingleMenuImage({ repoPath, remoteUrl, branch, localImagePath }) {
+/**
+ * 레포를 "단일 커밋 스냅샷"으로 유지하며 강제 푸시합니다.
+ * - origin/main 내용을 워킹트리에 받음
+ * - 메뉴 이미지들만 교체
+ * - checkout --orphan 로 히스토리 제거(워킹트리 유지)
+ * - add -A 후 커밋 1개 만들고 main으로 force-push
+ */
+async function gitForcePushSnapshotWithMenus({ repoPath, remoteUrl, branch, menuFiles }) {
   const git = simpleGit({ baseDir: repoPath });
   const gitUserName = process.env.GITHUB_GIT_USER_NAME || 'Menu Bot';
   const gitUserEmail = process.env.GITHUB_GIT_USER_EMAIL || 'menu-bot@users.noreply.github.com';
@@ -118,41 +230,30 @@ async function gitPushSingleMenuImage({ repoPath, remoteUrl, branch, localImageP
   await git.addConfig('user.email', gitUserEmail, false, 'local');
   await git.remote(['set-url', 'origin', remoteUrl]);
 
-  let hasHead = false;
+  await git.fetch('origin').catch(() => {});
+  // 원격 브랜치 내용을 받되, 없으면 로컬 브랜치만 생성
   try {
-    await git.revparse(['HEAD']);
-    hasHead = true;
+    await git.checkout(branch);
   } catch {
-    hasHead = false;
+    await git.checkout(['-b', branch]).catch(() => {});
+  }
+  try {
+    await git.reset(['--hard', `origin/${branch}`]);
+  } catch {
+    /* 첫 푸시 등: 원격 브랜치가 없을 수 있음 */
   }
 
-  if (hasHead) {
-    await git.fetch('origin').catch(() => {});
-    try {
-      await git.checkout(branch);
-    } catch {
-      try {
-        await git.checkout(['-b', branch]);
-      } catch {
-        /* empty repo */
-      }
-    }
-    try {
-      await git.reset(['--hard', `origin/${branch}`]);
-    } catch {
-      /* 원격에 브랜치 없음(첫 푸시 등) */
-    }
+  // 메뉴 파일 교체 (레포 루트에 3개 파일을 유지)
+  for (const f of menuFiles) {
+    const dest = path.join(repoPath, f.destFileName);
+    await fs.copyFile(f.localPath, dest);
   }
 
   const orphanName = `orphan_${Date.now()}`;
+  // orphan 체크아웃은 워킹트리 파일을 유지하므로, clean -fdx는 하지 않습니다.
   await git.raw(['checkout', '--orphan', orphanName]);
-  await git.raw(['clean', '-fdx']);
-
-  const dest = path.join(repoPath, 'menu_today.png');
-  await fs.copyFile(localImagePath, dest);
-
-  await git.add('menu_today.png');
-  await git.commit('Update menu');
+  await git.add(['-A']);
+  await git.commit('Snapshot update (menus)');
 
   try {
     await git.deleteLocalBranch(branch, true);
@@ -191,43 +292,62 @@ function todayDateKorea() {
       : {}),
   });
   const page = await browser.newPage();
-  await page.goto('http://pf.kakao.com/_xdLzxgG', { waitUntil: 'load' });
 
-  await page.waitForSelector('div.item_profile_head button.btn_thumb', {
-    timeout: 60000,
-  });
-  await page.click('div.item_profile_head button.btn_thumb');
-
-  await new Promise((resolve) => setTimeout(resolve, 5000));
-
-  const imageFileName = 'menu_today.png';
-  const imagePath = path.resolve(process.cwd(), imageFileName);
-  await page.screenshot({ path: imageFileName, fullPage: true });
+  const captured = [];
+  const captureErrors = [];
+  for (const r of RESTAURANTS) {
+    const localPath = path.resolve(process.cwd(), r.imageFileName);
+    try {
+      if (r.type === 'kakao') {
+        await captureKakaoProfileMenu(page, r.profileUrl, r.imageFileName);
+      } else if (r.type === 'naverMap') {
+        await captureNaverMapNews(page, r.profileUrl, r.imageFileName);
+      } else {
+        throw new Error(`지원하지 않는 type 입니다: ${r.type}`);
+      }
+      captured.push({ ...r, localPath });
+    } catch (e) {
+      captureErrors.push({ id: r.id, name: r.name, error: String(e?.message ?? e) });
+      console.error(`[캡처 실패] ${r.name}: ${String(e?.message ?? e)}`);
+    }
+  }
 
   await browser.close();
   console.log('캡처 완료! 폴더를 확인해 보세요.');
 
+  if (captured.length === 0) {
+    throw new Error('모든 식당 캡처에 실패했습니다.');
+  }
+
   await ensureClone(remoteUrl, repoPath);
-  await gitPushSingleMenuImage({
+  await gitForcePushSnapshotWithMenus({
     repoPath,
     remoteUrl,
     branch: GITHUB_BRANCH,
-    localImagePath: imagePath,
+    menuFiles: captured.map((c) => ({
+      localPath: c.localPath,
+      destFileName: c.imageFileName,
+    })),
   });
 
   const date = todayDateKorea();
-  const imageUrl = menuImageUrlWithCacheBust();
+  const restaurants = captured.map((c) => ({
+    id: c.id,
+    name: c.name,
+    imageUrl: withCacheBust(rawGithubFileUrl(c.imageFileName)),
+  }));
   await setDoc(
     doc(db, 'menus', FIRESTORE_MENU_DOC_ID),
     {
-      imageUrl,
+      restaurants,
+      captureErrors,
       date,
       updatedAt: serverTimestamp(),
     },
     { merge: true },
   );
   console.log(`Firestore menus/${FIRESTORE_MENU_DOC_ID} 문서를 갱신했습니다. (date: ${date})`);
-  console.log(`imageUrl: ${imageUrl}`);
+  console.log(`restaurants: ${restaurants.map((r) => r.imageUrl).join(', ')}`);
 })().catch((err) => {
   logErrorWithoutSecrets(err, process.env.GITHUB_TOKEN);
   process.exit(1);

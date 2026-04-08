@@ -97,6 +97,27 @@
         font-size: 0.8rem;
         color: var(--muted);
       }
+      #menus {
+        width: 100%;
+        max-width: 520px;
+        display: grid;
+        gap: 12px;
+      }
+      .menu-title {
+        margin: 0;
+        padding: 0.9rem 1rem 0.25rem;
+        font-size: 1rem;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      .menu-card {
+        width: 100%;
+        background: var(--card);
+        border-radius: 12px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+        overflow: hidden;
+        border: 1px solid rgba(0, 0, 0, 0.06);
+      }
       .date-badge {
         display: inline-block;
         margin-top: 0.75rem;
@@ -110,17 +131,14 @@
   </head>
   <body>
     <header>
-      <h1>오늘의 급식 메뉴</h1>
-      <p class="sub">Firestore에서 최신 정보를 불러옵니다.</p>
+      <h1>오늘의 메뉴</h1>
+      <p class="sub">벽산더이룸 / 더이츠푸드 / 봄봄 순서로 표시됩니다.</p>
     </header>
 
-    <main class="card">
-      <div class="img-wrap" id="img-wrap">
-        <div class="state" id="loading">불러오는 중…</div>
-        <div class="state" id="error" hidden></div>
-        <img id="menu-img" alt="오늘의 메뉴" hidden />
-      </div>
-    </main>
+    <div class="state" id="loading">불러오는 중…</div>
+    <div class="state" id="error" hidden></div>
+
+    <main id="menus"></main>
 
     <p class="date-badge" id="date-line" hidden></p>
     <p class="sub" id="updated-line" hidden style="margin-top: 0.5rem"></p>

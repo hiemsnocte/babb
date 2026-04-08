@@ -1,4 +1,8 @@
 # 매일 아침 10:30·11:30(KST) 두 번 실행 → 마지막(11:30) 결과가 DB·이미지에 남음
+#
+# [필수] GitHub Pages 최초 1회: 레포 Settings → Pages → Build and deployment
+#       → Source 를 "GitHub Actions" 로 선택 (안 하면 deploy job 이 404로 실패함)
+#
 name: Menu bot & GitHub Pages
 
 on:
@@ -28,7 +32,7 @@ jobs:
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v4
         with:
@@ -59,13 +63,14 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/configure-pages@v4
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v6
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: public
 
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
