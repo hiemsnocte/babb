@@ -46,6 +46,15 @@ const DEBUG_ENABLED = new URLSearchParams(window.location.search).has('debug');
 const EMOJIS = ['😍', '😋', '🤔', '😑', '😒', '😡', '🤬'];
 const DANMAKU_REPEAT_LIMIT = 10;
 
+function todayDateKorea() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
 // 남구로역(대략) 좌표
 const WEATHER_LAT = 37.4868;
 const WEATHER_LON = 126.8876;
@@ -249,15 +258,8 @@ function renderMenus(restaurants) {
     menusEl.appendChild(card);
 
     // --- per-card state (shared via Firestore) ---
-    const dateStr =
-      typeof window.__BABB_DATE__ === 'string' && window.__BABB_DATE__
-        ? window.__BABB_DATE__
-        : new Intl.DateTimeFormat('en-CA', {
-            timeZone: 'Asia/Seoul',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-          }).format(new Date());
+    // 댓글/이모지 저장·표시는 "항상 오늘(KST)" 기준으로 맞춥니다.
+    const dateStr = todayDateKorea();
 
     const rid = r.id || titleLeft.textContent;
     let state = { emojiCounts: {}, comments: [] };
@@ -424,7 +426,8 @@ function renderMenus(restaurants) {
       restaurantDocRef,
       (snap) => {
         const d = snap.exists() ? snap.data() : {};
-        state.emojiCounts = d.emojiCounts || {};
+        const rowDate = typeof d.date === 'string' ? d.date : '';
+        state.emojiCounts = rowDate === dateStr ? d.emojiCounts || {} : {};
         renderTitleRight();
       },
       (err) => console.error(err),
@@ -436,6 +439,7 @@ function renderMenus(restaurants) {
       (snap) => {
         state.comments = snap.docs
           .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() || {}) }))
+          .filter((c) => c.date === dateStr)
           .filter((c) => typeof c.text === 'string' && c.text.length > 0)
           .map((c) => ({ id: c.id, text: c.text }));
       },

@@ -538,12 +538,9 @@ async function captureNaverMapNews(page, url, imageFileName) {
 
   // 클릭 후 화면이 바뀔 시간을 확보 (요청사항: 10초)
   await new Promise((r) => setTimeout(r, 10000));
-  // 네이버 지도 뷰어는 회색 배경/여백이 커서 fullPage로 찍으면 메뉴 이미지가 작아 보입니다.
-  // 프레임 내부에서 가장 큰 이미지(메뉴)를 찾아 "이미지 자체"만 캡처합니다.
-  const saved = await screenshotLargestVisibleImage(frame, imageFileName);
-  if (!saved) {
-    await page.screenshot({ path: imageFileName, fullPage: true });
-  }
+  // 봄봄(네이버)은 요소 크롭 시 잘못된 영역이 잡히는 경우가 있어
+  // 기존처럼 페이지 전체를 캡처합니다.
+  await page.screenshot({ path: imageFileName, fullPage: true });
 }
 
 async function screenshotLargestVisibleImage(ctx, outPath) {
@@ -739,44 +736,7 @@ function todayDateKorea() {
   }).format(new Date());
 }
 
-function nowKstMinutes() {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Seoul',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date());
-  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
-  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
-  return h * 60 + m;
-}
-
-function shouldRunCaptureNowKst({ toleranceMin = 3 } = {}) {
-  // 목표 실행 시각(KST). GitHub 스케줄 지연/편차를 감안해 ±toleranceMin 분만 허용.
-  const targets = ['10:07', '11:07', '23:57']
-    .map((s) => s.split(':').map((n) => Number(n)))
-    .map(([h, m]) => h * 60 + m);
-  const cur = nowKstMinutes();
-  return targets.some((t) => Math.abs(cur - t) <= toleranceMin);
-}
-
 (async () => {
-  // 수동 실행(workflow_dispatch)은 항상 실행. 스케줄은 KST 목표 시간대에만 실행.
-  const runEvent = (process.env.RUN_EVENT || '').trim();
-  const force = (process.env.FORCE_RUN || '').trim();
-  const isManual = runEvent === 'workflow_dispatch' || force === '1' || force.toLowerCase() === 'true';
-  if (!isManual) {
-    const ok = shouldRunCaptureNowKst({ toleranceMin: 3 });
-    if (!ok) {
-      const date = todayDateKorea();
-      const mins = nowKstMinutes();
-      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
-      const mm = String(mins % 60).padStart(2, '0');
-      console.log(`[skip] 스케줄 실행이지만 목표 시간대가 아님 (KST ${date} ${hh}:${mm})`);
-      process.exit(0);
-    }
-  }
-
   const firebaseConfig = loadFirebaseConfig();
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);

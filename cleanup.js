@@ -5,6 +5,7 @@ const {
   getFirestore,
   collection,
   doc,
+  getDoc,
   getDocs,
   limit,
   query,
@@ -47,89 +48,70 @@ function todayDateKorea() {
   }).format(new Date());
 }
 
-function nowKstMinutes() {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Seoul',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(new Date());
-  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
-  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
-  return h * 60 + m;
-}
-
-function shouldRunCleanupNowKst({ toleranceMin = 3 } = {}) {
-  // 목표 실행 시각(KST): 00:07. 스케줄 지연을 감안해 ±toleranceMin 분만 허용.
-  const target = 0 * 60 + 7;
-  const cur = nowKstMinutes();
-  return Math.abs(cur - target) <= toleranceMin;
-}
-
-async function deleteAllDocsInCollection(colRef, pageSize = 300) {
-  // Firestore Web SDK는 "recursive delete"가 없어서, 페이지네이션으로 전부 지웁니다.
-  // 코멘트 수가 많지 않다는 가정(최대 30개만 UI에서 보여줌) 하에 충분합니다.
-  // 그래도 안전하게 반복합니다.
+async function deleteOldCommentDocs(colRef, dateStr, pageSize = 300) {
+  // Firestore Web SDK는 "where + orderBy + batch recursive delete"가 제한적이라
+  // 페이지네이션으로 읽은 뒤 date가 오늘이 아닌 문서만 삭제합니다.
+  let deleted = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const snap = await getDocs(query(colRef, limit(pageSize)));
-    if (snap.empty) return 0;
+    if (snap.empty) return deleted;
 
     const batch = writeBatch(colRef.firestore);
-    snap.docs.forEach((d) => batch.delete(d.ref));
-    await batch.commit();
+    let toDelete = 0;
+    snap.docs.forEach((d) => {
+      const data = d.data() || {};
+      if (data.date !== dateStr) {
+        batch.delete(d.ref);
+        toDelete += 1;
+      }
+    });
+    if (toDelete > 0) {
+      await batch.commit();
+      deleted += toDelete;
+    }
 
-    if (snap.size < pageSize) return snap.size;
+    if (snap.size < pageSize) return deleted;
   }
 }
 
 async function resetRestaurantDailyState(db, rid, dateStr) {
   const restaurantDocRef = doc(db, 'menus', 'current', 'restaurants', rid);
-  // emojiCounts를 비우고 날짜만 오늘로 갱신
-  await setDoc(
-    restaurantDocRef,
-    {
-      date: dateStr,
-      emojiCounts: {},
-      updatedAt: serverTimestamp(),
-    },
-    { merge: true },
-  );
+  // 날짜가 오늘이 아니면 이모지를 비웁니다. (오늘 데이터는 유지)
+  const restaurantSnap = await getDoc(restaurantDocRef);
+  const restaurantData = restaurantSnap.exists() ? restaurantSnap.data() : null;
+  const restaurantDate = typeof restaurantData?.date === 'string' ? restaurantData.date : '';
+  if (!restaurantData || restaurantDate !== dateStr) {
+    await setDoc(
+      restaurantDocRef,
+      {
+        date: dateStr,
+        emojiCounts: {},
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  }
 
   const commentsColRef = collection(db, 'menus', 'current', 'restaurants', rid, 'comments');
-  await deleteAllDocsInCollection(commentsColRef);
+  return deleteOldCommentDocs(commentsColRef, dateStr);
 }
 
 (async () => {
-  // 수동 실행(workflow_dispatch)은 항상 실행. 스케줄은 KST 00:07 부근에만 실행.
-  const runEvent = (process.env.RUN_EVENT || '').trim();
-  const force = (process.env.FORCE_RUN || '').trim();
-  const isManual = runEvent === 'workflow_dispatch' || force === '1' || force.toLowerCase() === 'true';
-  if (!isManual) {
-    const ok = shouldRunCleanupNowKst({ toleranceMin: 3 });
-    if (!ok) {
-      const date = todayDateKorea();
-      const mins = nowKstMinutes();
-      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
-      const mm = String(mins % 60).padStart(2, '0');
-      console.log(`[skip] 스케줄 실행이지만 목표 시간대가 아님 (KST ${date} ${hh}:${mm})`);
-      process.exit(0);
-    }
-  }
-
   const firebaseConfig = loadFirebaseConfig();
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
 
   const dateStr = todayDateKorea();
   const restaurantIds = ['beoksan', 'theeats', 'bombom'];
+  let deletedComments = 0;
 
   for (const rid of restaurantIds) {
     // eslint-disable-next-line no-await-in-loop
-    await resetRestaurantDailyState(db, rid, dateStr);
+    deletedComments += await resetRestaurantDailyState(db, rid, dateStr);
   }
 
-  console.log(`[cleanup] KST ${dateStr} 자정 리셋 완료 (emojiCounts/comments)`);
+  console.log(`[cleanup] KST ${dateStr} 정리 완료 (삭제된 지난 날짜 comments: ${deletedComments})`);
 })().catch((err) => {
   console.error(err?.stack || String(err));
   process.exit(1);
