@@ -115,23 +115,326 @@ async function captureNaverMapNews(page, url, imageFileName) {
   // 화면 전환 대기 (요청사항: 10초 정도)
   await new Promise((r) => setTimeout(r, 10000));
 
-  // <div class="Hqj1R"> 안의 <div class="zmCWt"> (업로드된 메뉴사진 버튼) 클릭
-  const menuButtonSelector = 'div.Hqj1R div.zmCWt';
-  await frame.waitForSelector(menuButtonSelector, { timeout: 60000 });
-  const menuButton = await frame.$(menuButtonSelector);
-  if (!menuButton) throw new Error('메뉴 사진 버튼(zmCWt)을 찾지 못했습니다.');
-  await menuButton.click();
+  /**
+   * 네이버가 클래스를 자주 바꿔서, 고정 클래스보다
+   * 1) .place_thumb 안 img(썸네일 — ::after는 DOM에 없어 부모/이미지로 클릭)
+   * 2) 텍스트 "메뉴" (소식 피드 쪽; 상단과 겹치면 잘못 누를 수 있어 2순위)
+   * 3) 예전 구조(Hqj1R/zmCWt) 폴백
+   * 순으로 시도합니다.
+   */
+  async function tryClickMenuPhotoButton(fr) {
+    const menuTextXPath =
+      "//*[self::a or self::button][contains(normalize-space(.), '메뉴')]";
+
+    // 1) .place_thumb — ::after는 선택 불가.
+    //    소식 피드에 이미지가 많아도, "규격(339x226)"에 가까운 썸네일을 먼저 집습니다.
+    const thumbResult = await fr.evaluate(() => {
+      const TARGET_W = 339;
+      const TARGET_H = 226;
+      const TOL = 3; // px 오차 허용
+
+      function approx(n, t) {
+        return Math.abs(n - t) <= TOL;
+      }
+
+      function isVisible(el) {
+        if (!(el instanceof Element)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')
+          return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 10 && r.height > 10;
+      }
+
+      const roots = Array.from(
+        document.querySelectorAll('.place_thumb, [class*="place_thumb"]'),
+      );
+
+      // 1-a) place_thumb 내부 img 중 규격 매칭 우선
+      for (const root of roots) {
+        const imgs = Array.from(root.querySelectorAll('img'));
+        for (const img of imgs) {
+          if (!(img instanceof HTMLImageElement)) continue;
+          if (!isVisible(img)) continue;
+          const src = (img.getAttribute('src') || '').trim();
+          if (!src || src.startsWith('data:')) continue;
+
+          // 자연 크기 or 표시 크기(둘 다 검사)
+          const nw = img.naturalWidth || 0;
+          const nh = img.naturalHeight || 0;
+          const rect = img.getBoundingClientRect();
+          const rw = Math.round(rect.width);
+          const rh = Math.round(rect.height);
+
+          const sizeOk =
+            (nw && nh && approx(nw, TARGET_W) && approx(nh, TARGET_H)) ||
+            (approx(rw, TARGET_W) && approx(rh, TARGET_H));
+          if (!sizeOk) continue;
+
+          const clickable =
+            root.closest('a, button, [role="button"]') ||
+            (root instanceof HTMLElement ? root : null) ||
+            img;
+          if (clickable instanceof HTMLElement) {
+            clickable.click();
+            return {
+              ok: true,
+              reason: 'place_thumb:size',
+              srcPreview: src.slice(0, 200),
+              size: { natural: [nw, nh], rect: [rw, rh] },
+            };
+          }
+        }
+      }
+
+      // 1-b) place_thumb에서 못 찾으면, 전체 img 중 규격 매칭 (피드 외부까지 넓힘)
+      const allImgs = Array.from(document.querySelectorAll('img'));
+      for (const img of allImgs) {
+        if (!(img instanceof HTMLImageElement)) continue;
+        if (!isVisible(img)) continue;
+        const src = (img.getAttribute('src') || '').trim();
+        if (!src || src.startsWith('data:')) continue;
+        const nw = img.naturalWidth || 0;
+        const nh = img.naturalHeight || 0;
+        const rect = img.getBoundingClientRect();
+        const rw = Math.round(rect.width);
+        const rh = Math.round(rect.height);
+        const sizeOk =
+          (nw && nh && approx(nw, TARGET_W) && approx(nh, TARGET_H)) ||
+          (approx(rw, TARGET_W) && approx(rh, TARGET_H));
+        if (!sizeOk) continue;
+
+        const clickable =
+          img.closest('.place_thumb, [class*="place_thumb"]')?.closest('a, button, [role="button"]') ||
+          img.closest('a, button, [role="button"]') ||
+          (img instanceof HTMLElement ? img : null);
+        if (clickable instanceof HTMLElement) {
+          clickable.click();
+          return {
+            ok: true,
+            reason: 'img:size',
+            srcPreview: src.slice(0, 200),
+            size: { natural: [nw, nh], rect: [rw, rh] },
+          };
+        }
+      }
+
+      return { ok: false };
+    });
+    if (thumbResult.ok) {
+      console.log(
+        '[봄봄] 썸네일 클릭:',
+        thumbResult.reason,
+        thumbResult.size ? JSON.stringify(thumbResult.size) : '',
+        thumbResult.srcPreview,
+      );
+      return true;
+    }
+
+    // 2) 텍스트로 "메뉴" (피드/버튼)
+    try {
+      const h = await fr.waitForFunction(
+        (xpath) => {
+          const r = document.evaluate(
+            xpath,
+            document,
+            null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE,
+            null,
+          );
+          return r.singleNodeValue || null;
+        },
+        { timeout: 8000 },
+        menuTextXPath,
+      );
+      const el = await h.asElement();
+      if (el) {
+        await el.click();
+        console.log('[봄봄] 텍스트 "메뉴" 요소 클릭');
+        return true;
+      }
+    } catch {
+      /* 다음 */
+    }
+
+    // 3) 예전 클래스 기반 폴백
+    const trySelectors = [
+      'div.Hqj1R div.zmCWt',
+      'div.Hqj1R button',
+      'div.Hqj1R [role="button"]',
+      'div[class*="Hqj1R"] div[class*="zmCWt"]',
+      '[class*="zmCWt"]',
+    ];
+    for (const sel of trySelectors) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await fr.waitForSelector(sel, { timeout: 8000 });
+        // eslint-disable-next-line no-await-in-loop
+        const el = await fr.$(sel);
+        if (el) {
+          // eslint-disable-next-line no-await-in-loop
+          await el.click();
+          console.log('[봄봄] 레거시 셀렉터 클릭:', sel);
+          return true;
+        }
+      } catch {
+        /* 다음 */
+      }
+    }
+
+    const clicked = await fr.evaluate(() => {
+      const root =
+        document.querySelector('div.Hqj1R') ||
+        document.querySelector('[class*="Hqj1R"]') ||
+        document.body;
+      const candidates = root.querySelectorAll(
+        'button, [role="button"], a, img, div[tabindex="0"]',
+      );
+      for (const c of candidates) {
+        const t = (c.textContent || '').replace(/\s+/g, ' ').trim();
+        const alt = (c.getAttribute && c.getAttribute('alt')) || '';
+        if (t.includes('메뉴') || alt.includes('메뉴')) {
+          if (typeof c.click === 'function') c.click();
+          return true;
+        }
+      }
+      const firstInHqj = root.querySelector('img, [class*="zmCWt"]');
+      if (firstInHqj && typeof firstInHqj.click === 'function') {
+        firstInHqj.click();
+        return true;
+      }
+      return false;
+    });
+    return clicked;
+  }
+
+  const menuClicked = await tryClickMenuPhotoButton(frame);
+  if (!menuClicked) {
+    console.warn(
+      '[봄봄] 메뉴 사진 버튼을 찾지 못했습니다. 소식 탭 화면으로 스크린샷합니다.',
+    );
+    await new Promise((r) => setTimeout(r, 3000));
+    await page.screenshot({ path: imageFileName, fullPage: true });
+    return;
+  }
 
   // 줌 UI는 클릭 후 다른 레이어/프레임으로 이동할 수 있어, 전체 프레임에서 다시 찾습니다.
+  let zoomPlusClicks = 0;
+  let zoomWheelDispatches = 0;
+  let effectiveZoomIn = 0;
+  let lastMinusEnabled = null;
+
+  async function getZoomButtonsState(ctx) {
+    try {
+      return await ctx.evaluate(() => {
+        const plus = document.querySelector('div.btn_zoom button.btn_plus');
+        const minus = document.querySelector('div.btn_zoom button.btn_minus');
+
+        function btnInfo(el) {
+          if (!(el instanceof HTMLButtonElement)) return { exists: false };
+          const rect = el.getBoundingClientRect();
+          return {
+            exists: true,
+            disabled: !!(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+            rect: {
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              w: Math.round(rect.width),
+              h: Math.round(rect.height),
+            },
+          };
+        }
+
+        return { plus: btnInfo(plus), minus: btnInfo(minus) };
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async function getMainImageMetrics(ctx) {
+    try {
+      return await ctx.evaluate(() => {
+        function isVisible(el) {
+          if (!(el instanceof Element)) return false;
+          const style = window.getComputedStyle(el);
+          if (
+            style.display === 'none' ||
+            style.visibility === 'hidden' ||
+            style.opacity === '0'
+          )
+            return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 10 && r.height > 10;
+        }
+
+        const imgs = Array.from(document.querySelectorAll('img')).filter(isVisible);
+        if (imgs.length === 0) return null;
+
+        // 가장 크게 보이는 이미지를 "메인 뷰어"로 간주
+        let best = imgs[0];
+        let bestArea = 0;
+        for (const img of imgs) {
+          const r = img.getBoundingClientRect();
+          const area = r.width * r.height;
+          if (area > bestArea) {
+            bestArea = area;
+            best = img;
+          }
+        }
+        const rect = best.getBoundingClientRect();
+        const src = (best.getAttribute('src') || '').slice(0, 200);
+        const nw = best.naturalWidth || 0;
+        const nh = best.naturalHeight || 0;
+        return {
+          rect: {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            w: Math.round(rect.width),
+            h: Math.round(rect.height),
+          },
+          natural: [nw, nh],
+          srcPreview: src,
+        };
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async function sampleMinus(ctx, label) {
+    const cur = await isMinusEnabledInContext(ctx);
+    const state = await getZoomButtonsState(ctx);
+    const img = await getMainImageMetrics(ctx);
+    const prev = lastMinusEnabled;
+    if (prev === false && cur === true) {
+      effectiveZoomIn += 1;
+      console.log(`[봄봄] 줌 반영 감지(+): ${label} (effective=${effectiveZoomIn})`);
+    }
+    console.log(
+      `[봄봄] 줌 상태(${label}): minusEnabled=${cur} prev=${prev} buttons=${state ? JSON.stringify(state) : 'n/a'} img=${img ? JSON.stringify(img) : 'n/a'}`,
+    );
+    lastMinusEnabled = cur;
+    return cur;
+  }
+
   async function tryClickZoomPlusInContext(ctx, attempts = 5) {
     const zoomPlusSelector = 'div.btn_zoom button.btn_plus';
     try {
       await ctx.waitForSelector(zoomPlusSelector, { timeout: 2000 });
+      await sampleMinus(ctx, 'before-plus');
       for (let i = 0; i < attempts; i += 1) {
+        const st = await getZoomButtonsState(ctx);
+        if (st?.plus?.exists && st.plus.disabled) {
+          console.log(`[봄봄] plus 버튼이 disabled라 클릭 스킵 (i=${i})`);
+          break;
+        }
         await ctx.evaluate((sel) => {
           const el = document.querySelector(sel);
           if (el instanceof HTMLElement) el.click();
         }, zoomPlusSelector);
+        zoomPlusClicks += 1;
+        await sampleMinus(ctx, `after-plus-${i + 1}`);
         await new Promise((r) => setTimeout(r, 250));
       }
       return true;
@@ -156,90 +459,77 @@ async function captureNaverMapNews(page, url, imageFileName) {
   // 0) 클릭 직후 약간 대기(레이어 생성 시간)
   await new Promise((r) => setTimeout(r, 1200));
 
-  let zoomed = false;
-  // 1) entryIframe 안에서 먼저 시도
-  zoomed = await tryClickZoomPlusInContext(frame, 5);
+  async function findContextWithZoomControls(preferredCtx, timeoutMs = 12000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const st = await getZoomButtonsState(preferredCtx);
+        if (st?.plus?.exists || st?.minus?.exists) return preferredCtx;
+      } catch {
+        /* ignore */
+      }
 
-  // 2) 안 되면 페이지의 모든 프레임(최상위 포함)에서 탐색
-  if (!zoomed) {
-    for (const f of page.frames()) {
-      // 같은 frame 중복 시도 방지
-      if (f === frame) continue;
-      // eslint-disable-next-line no-await-in-loop
-      const ok = await tryClickZoomPlusInContext(f, 5);
-      if (ok) {
-        zoomed = true;
+      for (const f of page.frames()) {
+        if (f === preferredCtx) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const st = await getZoomButtonsState(f);
+        if (st?.plus?.exists || st?.minus?.exists) {
+          console.log(`[봄봄] 줌 컨트롤 프레임 전환 감지: ${f.url()}`);
+          return f;
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 350));
+    }
+    return null;
+  }
+
+  async function zoomInUntilStuck(ctx) {
+    // “안 될 때까지” = plus 버튼이 disabled(최대 줌) 될 때까지
+    // 혹시 DOM이 꼬여도 무한 루프 방지용으로 상한만 둡니다.
+    const MAX_STEPS = 40;
+    for (let step = 0; step < MAX_STEPS; step += 1) {
+      const st = await getZoomButtonsState(ctx);
+      if (!st?.plus?.exists) {
+        console.log('[봄봄] plus 버튼을 찾지 못해 줌인 루프 종료');
         break;
       }
-    }
-  }
-
-  // 3) 그래도 안 되면 ctrlKey 포함 wheel 이벤트를 프레임에 디스패치(지도에서 ctrl+wheel만 받는 케이스 대응)
-  if (!zoomed) {
-    try {
-      await frame.evaluate(() => {
-        const target =
-          document.querySelector('div.btn_zoom') ||
-          document.querySelector('div.Hqj1R') ||
-          document.body;
-        for (let i = 0; i < 60; i += 1) {
-          const evt = new WheelEvent('wheel', {
-            deltaY: -250,
-            bubbles: true,
-            cancelable: true,
-            ctrlKey: true,
-          });
-          target.dispatchEvent(evt);
-        }
-      });
-      console.log('[봄봄] 줌: ctrl+wheel 이벤트로 확대 시도 완료');
-    } catch {
-      console.warn('[봄봄] 줌(+) 버튼/휠 확대를 모두 실패해 스킵했습니다.');
-    }
-  }
-
-  // 4) "- 버튼 비활성화(=최소 줌)" 상태면 추가 확대를 조금 더 시도
-  //    (버튼/휠이 '실행'된 것과 '줌이 실제로 반영'된 것은 다를 수 있어 상태 기반으로 재시도)
-  try {
-    const minusEnabled0 = await isMinusEnabledInContext(frame);
-    if (minusEnabled0 === false) {
-      // 최대 3라운드 추가 시도
-      for (let round = 0; round < 3; round += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        const ok1 = await tryClickZoomPlusInContext(frame, 5);
-        if (!ok1) {
-          // eslint-disable-next-line no-await-in-loop
-          await frame.evaluate(() => {
-            const target =
-              document.querySelector('div.btn_zoom') ||
-              document.querySelector('div.Hqj1R') ||
-              document.body;
-            for (let i = 0; i < 40; i += 1) {
-              const evt = new WheelEvent('wheel', {
-                deltaY: -250,
-                bubbles: true,
-                cancelable: true,
-                ctrlKey: true,
-              });
-              target.dispatchEvent(evt);
-            }
-          });
-        }
-
-        // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, 500));
-        // eslint-disable-next-line no-await-in-loop
-        const minusEnabledN = await isMinusEnabledInContext(frame);
-        if (minusEnabledN === true) break;
+      if (st.plus.disabled) {
+        console.log('[봄봄] plus 버튼 disabled(최대 줌) → 종료');
+        break;
       }
+
+      // 1회 클릭
+      await sampleMinus(ctx, `before-plus-step-${step + 1}`);
+      await ctx.evaluate(() => {
+        const el = document.querySelector('div.btn_zoom button.btn_plus');
+        if (el instanceof HTMLElement) el.click();
+      });
+      zoomPlusClicks += 1;
+
+      await new Promise((r) => setTimeout(r, 300));
+      const after = await getZoomButtonsState(ctx);
+      console.log(
+        `[봄봄] 줌인 step=${step + 1} plusDisabled=${after?.plus?.disabled ?? null}`,
+      );
+      await sampleMinus(ctx, `after-plus-step-${step + 1}`);
     }
-  } catch {
-    /* ignore */
+  }
+
+  // 1) entryIframe 안에서 먼저 “안 될 때까지” 줌인
+  const zoomCtx = await findContextWithZoomControls(frame, 15000);
+  if (!zoomCtx) {
+    console.warn('[봄봄] 줌 컨트롤을 찾지 못했습니다. (줌 스킵)');
+  } else {
+    await zoomInUntilStuck(zoomCtx);
   }
 
   // 디버그: 줌(-) 버튼이 활성화되었는지(=확대된 흔적) 로그
   const minusEnabled = await isMinusEnabledInContext(frame);
   if (minusEnabled === true) console.log('[봄봄] 줌(-) 활성화 감지(확대된 것으로 추정)');
+  console.log(
+    `[봄봄] 줌 시도 요약: plusClick=${zoomPlusClicks}, wheelDispatch=${zoomWheelDispatches}, effectiveZoomIn=${effectiveZoomIn}`,
+  );
 
   // 클릭 후 화면이 바뀔 시간을 확보 (요청사항: 10초)
   await new Promise((r) => setTimeout(r, 10000));
@@ -354,6 +644,16 @@ async function gitForcePushSnapshotWithMenus({ repoPath, remoteUrl, branch, menu
   // menus 브랜치는 "이미지 파일만" 남기고 스냅샷 1커밋으로 유지합니다.
   const orphanName = `orphan_${Date.now()}`;
   await git.raw(['checkout', '--orphan', orphanName]);
+  // orphan checkout은 "히스토리만" 비우고 워킹트리는 그대로 유지합니다.
+  // 따라서 기존(main)에서 트래킹되던 파일들은 git clean만으로는 제거되지 않습니다.
+  // menus 브랜치에 이미지 외 파일이 섞이지 않게, .git을 제외한 모든 파일을 직접 삭제합니다.
+  const entries = await fs.readdir(repoPath, { withFileTypes: true });
+  for (const ent of entries) {
+    if (ent.name === '.git') continue;
+    // eslint-disable-next-line no-await-in-loop
+    await fs.rm(path.join(repoPath, ent.name), { recursive: true, force: true });
+  }
+  // 안전망: 남아있는 untracked도 정리
   await git.raw(['clean', '-fdx']);
 
   for (const f of menuFiles) {
@@ -372,6 +672,8 @@ async function gitForcePushSnapshotWithMenus({ repoPath, remoteUrl, branch, menu
 
   await git.raw(['branch', '-m', branch]);
   await git.raw(['push', '--force', 'origin', branch]);
+  const names = menuFiles.map((m) => m.destFileName).join(', ');
+  console.log(`[menus] force-push 완료: origin/${branch} (파일: ${names})`);
 }
 
 function todayDateKorea() {
@@ -401,6 +703,8 @@ function todayDateKorea() {
       : {}),
   });
   const page = await browser.newPage();
+  // 로컬 브라우저와 CI(헤드리스)에서 레이아웃·줌 UI 위치가 달라지는 것을 줄이기 위해 고정
+  await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 1 });
 
   const captured = [];
   const captureErrors = [];
