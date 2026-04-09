@@ -59,9 +59,9 @@ function nowKstMinutes() {
   return h * 60 + m;
 }
 
-function shouldRunCleanupNowKst({ toleranceMin = 7 } = {}) {
-  // 목표 실행 시각(KST): 23:12. 스케줄 지연을 감안해 ±toleranceMin 분만 허용.
-  const target = 23 * 60 + 12;
+function shouldRunCleanupNowKst({ toleranceMin = 3 } = {}) {
+  // 목표 실행 시각(KST): 00:07. 스케줄 지연을 감안해 ±toleranceMin 분만 허용.
+  const target = 0 * 60 + 7;
   const cur = nowKstMinutes();
   return Math.abs(cur - target) <= toleranceMin;
 }
@@ -101,12 +101,12 @@ async function resetRestaurantDailyState(db, rid, dateStr) {
 }
 
 (async () => {
-  // 수동 실행(workflow_dispatch)은 항상 실행. 스케줄은 KST 23:12 부근에만 실행.
+  // 수동 실행(workflow_dispatch)은 항상 실행. 스케줄은 KST 00:07 부근에만 실행.
   const runEvent = (process.env.RUN_EVENT || '').trim();
   const force = (process.env.FORCE_RUN || '').trim();
   const isManual = runEvent === 'workflow_dispatch' || force === '1' || force.toLowerCase() === 'true';
   if (!isManual) {
-    const ok = shouldRunCleanupNowKst({ toleranceMin: 7 });
+    const ok = shouldRunCleanupNowKst({ toleranceMin: 3 });
     if (!ok) {
       const date = todayDateKorea();
       const mins = nowKstMinutes();

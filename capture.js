@@ -751,9 +751,9 @@ function nowKstMinutes() {
   return h * 60 + m;
 }
 
-function shouldRunCaptureNowKst({ toleranceMin = 7 } = {}) {
+function shouldRunCaptureNowKst({ toleranceMin = 3 } = {}) {
   // 목표 실행 시각(KST). GitHub 스케줄 지연/편차를 감안해 ±toleranceMin 분만 허용.
-  const targets = ['10:00', '11:00', '12:00', '23:00', '23:30']
+  const targets = ['10:07', '11:07', '23:57']
     .map((s) => s.split(':').map((n) => Number(n)))
     .map(([h, m]) => h * 60 + m);
   const cur = nowKstMinutes();
@@ -766,7 +766,7 @@ function shouldRunCaptureNowKst({ toleranceMin = 7 } = {}) {
   const force = (process.env.FORCE_RUN || '').trim();
   const isManual = runEvent === 'workflow_dispatch' || force === '1' || force.toLowerCase() === 'true';
   if (!isManual) {
-    const ok = shouldRunCaptureNowKst({ toleranceMin: 7 });
+    const ok = shouldRunCaptureNowKst({ toleranceMin: 3 });
     if (!ok) {
       const date = todayDateKorea();
       const mins = nowKstMinutes();

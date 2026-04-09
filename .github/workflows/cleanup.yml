@@ -2,9 +2,9 @@ name: Daily cleanup (emoji/comments)
 
 on:
   schedule:
-    # GitHub 스케줄 지연을 대비해 자주 깨우고,
-    # 실제 cleanup은 cleanup.js에서 KST 23:12에만 수행합니다(가드).
-    - cron: '*/10 * * * *'
+    # 혼잡한 정각/10분 단위를 피하기 위해 매시 :07에만 깨웁니다.
+    # 실제 cleanup은 cleanup.js의 KST 시간 가드로 최종 제어합니다.
+    - cron: '7 * * * *'
   workflow_dispatch:
 
 permissions:

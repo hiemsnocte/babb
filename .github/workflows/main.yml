@@ -11,9 +11,9 @@ on:
       - 'public/**'
       - '.github/workflows/main.yml'
   schedule:
-    # GitHub 스케줄은 지연될 수 있어, 자주 깨우고(cadence)
-    # 실제 캡처는 capture.js에서 KST 목표 시간대에만 수행합니다(가드).
-    - cron: '*/10 * * * *'
+    # 혼잡한 정각/10분 단위를 피하기 위해 :07, :57에만 깨웁니다.
+    # 실제 캡처는 capture.js의 KST 시간 가드로 최종 제어합니다.
+    - cron: '7,57 * * * *'
   workflow_dispatch:
 
 permissions:
