@@ -47,6 +47,25 @@ function todayDateKorea() {
   }).format(new Date());
 }
 
+function nowKstMinutes() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
+  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+  return h * 60 + m;
+}
+
+function shouldRunCleanupNowKst({ toleranceMin = 7 } = {}) {
+  // 목표 실행 시각(KST): 23:12. 스케줄 지연을 감안해 ±toleranceMin 분만 허용.
+  const target = 23 * 60 + 12;
+  const cur = nowKstMinutes();
+  return Math.abs(cur - target) <= toleranceMin;
+}
+
 async function deleteAllDocsInCollection(colRef, pageSize = 300) {
   // Firestore Web SDK는 "recursive delete"가 없어서, 페이지네이션으로 전부 지웁니다.
   // 코멘트 수가 많지 않다는 가정(최대 30개만 UI에서 보여줌) 하에 충분합니다.
@@ -82,6 +101,22 @@ async function resetRestaurantDailyState(db, rid, dateStr) {
 }
 
 (async () => {
+  // 수동 실행(workflow_dispatch)은 항상 실행. 스케줄은 KST 23:12 부근에만 실행.
+  const runEvent = (process.env.RUN_EVENT || '').trim();
+  const force = (process.env.FORCE_RUN || '').trim();
+  const isManual = runEvent === 'workflow_dispatch' || force === '1' || force.toLowerCase() === 'true';
+  if (!isManual) {
+    const ok = shouldRunCleanupNowKst({ toleranceMin: 7 });
+    if (!ok) {
+      const date = todayDateKorea();
+      const mins = nowKstMinutes();
+      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+      const mm = String(mins % 60).padStart(2, '0');
+      console.log(`[skip] 스케줄 실행이지만 목표 시간대가 아님 (KST ${date} ${hh}:${mm})`);
+      process.exit(0);
+    }
+  }
+
   const firebaseConfig = loadFirebaseConfig();
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);

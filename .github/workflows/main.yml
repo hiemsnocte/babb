@@ -11,16 +11,9 @@ on:
       - 'public/**'
       - '.github/workflows/main.yml'
   schedule:
-    # --- 아침 (KST) ---
-    # 한국시간 10:30 = UTC 01:30
-    - cron: '30 1 * * *'
-    # 한국시간 11:30 = UTC 02:30
-    - cron: '30 2 * * *'
-    # --- 저녁 (KST) ---
-    # 한국시간 21:30 = UTC 12:30
-    - cron: '30 12 * * *'
-    # 한국시간 22:00 = UTC 13:00
-    - cron: '0 13 * * *'
+    # GitHub 스케줄은 지연될 수 있어, 자주 깨우고(cadence)
+    # 실제 캡처는 capture.js에서 KST 목표 시간대에만 수행합니다(가드).
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -53,6 +46,7 @@ jobs:
       - name: Run capture bot
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RUN_EVENT: ${{ github.event_name }}
           FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
           FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}

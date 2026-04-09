@@ -57,7 +57,12 @@ async function captureKakaoProfileMenu(page, url, imageFileName) {
   });
   await page.click('div.item_profile_head button.btn_thumb');
   await new Promise((resolve) => setTimeout(resolve, 5000));
-  await page.screenshot({ path: imageFileName, fullPage: true });
+  // 전체 화면(fullPage) 캡처는 모달 주변 여백까지 포함되어 "작게" 보일 수 있어
+  // 가장 크게 보이는 이미지 요소만 잘라 저장합니다(실패 시 fullPage 폴백).
+  const saved = await screenshotLargestVisibleImage(page, imageFileName);
+  if (!saved) {
+    await page.screenshot({ path: imageFileName, fullPage: true });
+  }
 }
 
 function pickFrameByUrl(page, predicate) {
@@ -533,7 +538,56 @@ async function captureNaverMapNews(page, url, imageFileName) {
 
   // 클릭 후 화면이 바뀔 시간을 확보 (요청사항: 10초)
   await new Promise((r) => setTimeout(r, 10000));
-  await page.screenshot({ path: imageFileName, fullPage: true });
+  // 네이버 지도 뷰어는 회색 배경/여백이 커서 fullPage로 찍으면 메뉴 이미지가 작아 보입니다.
+  // 프레임 내부에서 가장 큰 이미지(메뉴)를 찾아 "이미지 자체"만 캡처합니다.
+  const saved = await screenshotLargestVisibleImage(frame, imageFileName);
+  if (!saved) {
+    await page.screenshot({ path: imageFileName, fullPage: true });
+  }
+}
+
+async function screenshotLargestVisibleImage(ctx, outPath) {
+  try {
+    const imgs = await ctx.$$('img');
+    if (!imgs || imgs.length === 0) return false;
+
+    let best = null;
+    let bestArea = 0;
+
+    for (const h of imgs) {
+      // eslint-disable-next-line no-await-in-loop
+      const bb = await h.boundingBox();
+      if (!bb) continue;
+      const area = bb.width * bb.height;
+      if (area < 10 * 10) continue;
+
+      // eslint-disable-next-line no-await-in-loop
+      const visible = await h.evaluate((el) => {
+        if (!(el instanceof Element)) return false;
+        const style = window.getComputedStyle(el);
+        if (
+          style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          style.opacity === '0'
+        )
+          return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 10 && r.height > 10;
+      });
+      if (!visible) continue;
+
+      if (area > bestArea) {
+        bestArea = area;
+        best = h;
+      }
+    }
+
+    if (!best) return false;
+    await best.screenshot({ path: outPath });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function loadFirebaseConfig() {
@@ -685,7 +739,44 @@ function todayDateKorea() {
   }).format(new Date());
 }
 
+function nowKstMinutes() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Seoul',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date());
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
+  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+  return h * 60 + m;
+}
+
+function shouldRunCaptureNowKst({ toleranceMin = 7 } = {}) {
+  // 목표 실행 시각(KST). GitHub 스케줄 지연/편차를 감안해 ±toleranceMin 분만 허용.
+  const targets = ['10:00', '11:00', '12:00', '23:00', '23:30']
+    .map((s) => s.split(':').map((n) => Number(n)))
+    .map(([h, m]) => h * 60 + m);
+  const cur = nowKstMinutes();
+  return targets.some((t) => Math.abs(cur - t) <= toleranceMin);
+}
+
 (async () => {
+  // 수동 실행(workflow_dispatch)은 항상 실행. 스케줄은 KST 목표 시간대에만 실행.
+  const runEvent = (process.env.RUN_EVENT || '').trim();
+  const force = (process.env.FORCE_RUN || '').trim();
+  const isManual = runEvent === 'workflow_dispatch' || force === '1' || force.toLowerCase() === 'true';
+  if (!isManual) {
+    const ok = shouldRunCaptureNowKst({ toleranceMin: 7 });
+    if (!ok) {
+      const date = todayDateKorea();
+      const mins = nowKstMinutes();
+      const hh = String(Math.floor(mins / 60)).padStart(2, '0');
+      const mm = String(mins % 60).padStart(2, '0');
+      console.log(`[skip] 스케줄 실행이지만 목표 시간대가 아님 (KST ${date} ${hh}:${mm})`);
+      process.exit(0);
+    }
+  }
+
   const firebaseConfig = loadFirebaseConfig();
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
@@ -704,7 +795,8 @@ function todayDateKorea() {
   });
   const page = await browser.newPage();
   // 로컬 브라우저와 CI(헤드리스)에서 레이아웃·줌 UI 위치가 달라지는 것을 줄이기 위해 고정
-  await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor: 1 });
+  // 너무 큰 뷰포트는 "이미지+회색 여백" 비중을 키워 결과가 작아 보일 수 있어 적당히 낮춥니다.
+  await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
 
   const captured = [];
   const captureErrors = [];

@@ -2,10 +2,9 @@ name: Daily cleanup (emoji/comments)
 
 on:
   schedule:
-    # 한국시간 22:10 = UTC 13:10 (저녁 22:00 캡처 직후 초기화 — 동시 실행 충돌 방지)
-    - cron: '10 13 * * *'
-    # 자정(한국) 정리가 필요하면 아래 주석 해제
-    # - cron: '0 15 * * *'
+    # GitHub 스케줄 지연을 대비해 자주 깨우고,
+    # 실제 cleanup은 cleanup.js에서 KST 23:12에만 수행합니다(가드).
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 permissions:
@@ -27,6 +26,7 @@ jobs:
 
       - name: Reset emoji/comments in Firestore
         env:
+          RUN_EVENT: ${{ github.event_name }}
           FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
           FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
