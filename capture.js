@@ -95,27 +95,42 @@ async function captureNaverMapNews(page, url, imageFileName) {
   const frame = await entryIframe.contentFrame();
   if (!frame) throw new Error('네이버 지도 entryIframe 프레임을 얻지 못했습니다.');
 
-  // "소식" 탭 클릭
-  // Puppeteer는 text="..." 셀렉터를 지원하지 않으므로 XPath로 텍스트를 찾습니다.
-  const newsXPath =
-    "//*[self::a or self::button][contains(normalize-space(.), '소식')]";
-  const newsElHandle = await frame.waitForFunction(
-    (xpath) => {
-      const r = document.evaluate(
-        xpath,
-        document,
-        null,
-        XPathResult.FIRST_ORDERED_NODE_TYPE,
-        null,
+  // "소식(News)" 탭 클릭.
+  // CI에서 언어/렌더링이 달라도 동작하도록 텍스트 + href/feed 패턴을 함께 사용합니다.
+  const clickedNews = await frame.waitForFunction(
+    () => {
+      function isVisible(el) {
+        if (!(el instanceof Element)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')
+          return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 6 && r.height > 6;
+      }
+
+      function isNewsTab(el) {
+        const txt = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const href = (el.getAttribute('href') || '').toLowerCase();
+        return txt.includes('소식') || txt === 'news' || href.includes('/feed');
+      }
+
+      const nodes = Array.from(document.querySelectorAll('a, button, [role="tab"]')).filter(
+        (el) => isVisible(el) && isNewsTab(el),
       );
-      return r.singleNodeValue || null;
+      if (nodes.length === 0) return false;
+
+      const inTablist = nodes.find((el) => el.closest('[role="tablist"]'));
+      const target = inTablist || nodes[0];
+      if (target instanceof HTMLElement) {
+        target.click();
+        return true;
+      }
+      return false;
     },
     { timeout: 60000 },
-    newsXPath,
   );
-  const newsEl = await newsElHandle.asElement();
-  if (!newsEl) throw new Error('소식 탭 요소를 찾지 못했습니다.');
-  await newsEl.click();
+  const clickedNewsValue = await clickedNews.jsonValue();
+  if (!clickedNewsValue) throw new Error('소식 탭 요소를 찾지 못했습니다.');
 
   // 화면 전환 대기 (요청사항: 10초 정도)
   await new Promise((r) => setTimeout(r, 10000));
@@ -128,9 +143,6 @@ async function captureNaverMapNews(page, url, imageFileName) {
    * 순으로 시도합니다.
    */
   async function tryClickMenuPhotoButton(fr) {
-    const menuTextXPath =
-      "//*[self::a or self::button][contains(normalize-space(.), '메뉴')]";
-
     // 1) .place_thumb — ::after는 선택 불가.
     //    소식 피드에 이미지가 많아도, "규격(339x226)"에 가까운 썸네일을 먼저 집습니다.
     const thumbResult = await fr.evaluate(() => {
@@ -224,7 +236,7 @@ async function captureNaverMapNews(page, url, imageFileName) {
         }
       }
 
-      return { ok: false };
+      return { ok: false, reason: 'thumb-not-found' };
     });
     if (thumbResult.ok) {
       console.log(
@@ -233,33 +245,54 @@ async function captureNaverMapNews(page, url, imageFileName) {
         thumbResult.size ? JSON.stringify(thumbResult.size) : '',
         thumbResult.srcPreview,
       );
-      return true;
+      return {
+        ok: true,
+        reason: thumbResult.reason || 'thumb',
+        strictPass: true,
+      };
     }
 
-    // 2) 텍스트로 "메뉴" (피드/버튼)
-    try {
-      const h = await fr.waitForFunction(
-        (xpath) => {
-          const r = document.evaluate(
-            xpath,
-            document,
-            null,
-            XPathResult.FIRST_ORDERED_NODE_TYPE,
-            null,
-          );
-          return r.singleNodeValue || null;
-        },
-        { timeout: 8000 },
-        menuTextXPath,
-      );
-      const el = await h.asElement();
-      if (el) {
-        await el.click();
-        console.log('[봄봄] 텍스트 "메뉴" 요소 클릭');
-        return true;
+    // 2) 텍스트 "메뉴"는 전역 탐색 시 상단 탭을 잘못 누를 수 있어
+    //    피드 카드/썸네일 근처 요소로 범위를 제한합니다.
+    const menuTextResult = await fr.evaluate(() => {
+      function isVisible(el) {
+        if (!(el instanceof Element)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')
+          return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 6 && r.height > 6;
       }
-    } catch {
-      /* 다음 */
+
+      const candidates = Array.from(
+        document.querySelectorAll('a, button, [role="button"], div[tabindex="0"]'),
+      );
+      for (const el of candidates) {
+        if (!(el instanceof HTMLElement)) continue;
+        if (!isVisible(el)) continue;
+        if (el.closest('[role="tablist"]')) continue; // 상단 탭 영역 제외
+
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text.includes('메뉴')) continue;
+
+        const nearThumb =
+          !!el.closest('.place_thumb, [class*="place_thumb"], [class*="thumb"]') ||
+          !!el.querySelector('img') ||
+          !!el.closest('article, li, [class*="feed"], [class*="news"], [class*="post"]');
+        if (!nearThumb) continue;
+
+        el.click();
+        return { ok: true };
+      }
+      return { ok: false };
+    });
+    if (menuTextResult.ok) {
+      console.log('[봄봄] 제한된 범위의 텍스트 "메뉴" 요소 클릭');
+      return {
+        ok: true,
+        reason: 'menu-text-near-thumb',
+        strictPass: false,
+      };
     }
 
     // 3) 예전 클래스 기반 폴백
@@ -280,7 +313,11 @@ async function captureNaverMapNews(page, url, imageFileName) {
           // eslint-disable-next-line no-await-in-loop
           await el.click();
           console.log('[봄봄] 레거시 셀렉터 클릭:', sel);
-          return true;
+          return {
+            ok: true,
+            reason: `legacy-selector:${sel}`,
+            strictPass: false,
+          };
         }
       } catch {
         /* 다음 */
@@ -310,17 +347,20 @@ async function captureNaverMapNews(page, url, imageFileName) {
       }
       return false;
     });
-    return clicked;
+    if (clicked) {
+      return { ok: true, reason: 'fallback-generic', strictPass: false };
+    }
+    return { ok: false, reason: 'all-fallbacks-failed' };
   }
 
-  const menuClicked = await tryClickMenuPhotoButton(frame);
-  if (!menuClicked) {
-    console.warn(
-      '[봄봄] 메뉴 사진 버튼을 찾지 못했습니다. 소식 탭 화면으로 스크린샷합니다.',
+  const menuClick = await tryClickMenuPhotoButton(frame);
+  if (!menuClick.ok) {
+    throw new Error(`[봄봄] 메뉴 사진 버튼 탐색 실패: ${menuClick.reason}`);
+  }
+  if (!menuClick.strictPass) {
+    throw new Error(
+      `[봄봄] 엄격 모드 실패(규격 매칭 썸네일 선택 아님): ${menuClick.reason}`,
     );
-    await new Promise((r) => setTimeout(r, 3000));
-    await page.screenshot({ path: imageFileName, fullPage: true });
-    return;
   }
 
   // 줌 UI는 클릭 후 다른 레이어/프레임으로 이동할 수 있어, 전체 프레임에서 다시 찾습니다.
@@ -748,12 +788,20 @@ function todayDateKorea() {
 
   const browser = await puppeteer.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--lang=ko-KR',
+    ],
     ...(process.env.PUPPETEER_EXECUTABLE_PATH
       ? { executablePath: process.env.PUPPETEER_EXECUTABLE_PATH }
       : {}),
   });
   const page = await browser.newPage();
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+  });
   // 로컬 브라우저와 CI(헤드리스)에서 레이아웃·줌 UI 위치가 달라지는 것을 줄이기 위해 고정
   // 너무 큰 뷰포트는 "이미지+회색 여백" 비중을 키워 결과가 작아 보일 수 있어 적당히 낮춥니다.
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
