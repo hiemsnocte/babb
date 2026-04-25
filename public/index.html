@@ -18,6 +18,8 @@
         --text: #1a1a1a;
         --muted: #5c5c5c;
         --accent: #2d6a4f;
+        /* 레이아웃 컨테이너 폭(PC는 기존 유지, 큰 폰은 조금 더 넓게) */
+        --container-max: 520px;
       }
       @media (prefers-color-scheme: dark) {
         :root {
@@ -58,12 +60,16 @@
       }
       .card {
         width: 100%;
-        max-width: 520px;
+        max-width: var(--container-max);
         background: var(--card);
         border-radius: 12px;
         box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
         overflow: hidden;
         border: 1px solid rgba(0, 0, 0, 0.06);
+      }
+      /* header-grid는 HTML에 inline max-width가 있어 !important로 덮어씁니다 */
+      .header-grid {
+        max-width: var(--container-max) !important;
       }
       .img-wrap {
         position: relative;
@@ -155,9 +161,16 @@
       }
       #menus {
         width: 100%;
-        max-width: 520px;
+        max-width: var(--container-max);
         display: grid;
         gap: 12px;
+      }
+
+      /* 큰 모바일(예: Ultra급)에서는 컨테이너 폭을 조금 더 넓혀 “좁게” 보이는 문제 완화 */
+      @media (min-width: 430px) and (max-width: 900px) {
+        :root {
+          --container-max: 620px;
+        }
       }
       .menu-title {
         margin: 0;
