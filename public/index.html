@@ -103,6 +103,10 @@
           grid-template-columns: auto 1fr auto !important;
           align-items: center !important;
         }
+        /* 모바일 상단 '메뉴 비교' 버튼을 더 왼쪽으로 */
+        .header-btn {
+          margin-left: -6px;
+        }
         #weather {
           min-width: 0 !important;
         }
@@ -613,8 +617,12 @@
         }
       }
       @media (max-width: 900px) {
-        .compare-grid {
-          grid-template-columns: 1fr;
+        /* 모바일에서는 항상 1열(세로)로 고정: cols-*가 특이성으로 이 규칙을 이기지 못하게 */
+        .compare-grid,
+        .compare-grid.cols-1,
+        .compare-grid.cols-2,
+        .compare-grid.cols-3 {
+          grid-template-columns: 1fr !important;
         }
       }
       .compare-item {

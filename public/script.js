@@ -560,6 +560,51 @@ function openCompareModal(restaurants) {
       ghost = null;
     };
 
+    const movePlaceholderToPointer = (clientX, clientY) => {
+      if (!placeholder || !placeholder.parentNode) return;
+      const ph = placeholder;
+      const children = [...m.grid.children].filter((el) => el !== ph);
+      if (children.length === 0) {
+        m.grid.appendChild(ph);
+        return;
+      }
+
+      // 포인터 기준으로 "가장 가까운" 아이템을 찾고, 그 아이템의 앞/뒤로 placeholder를 이동
+      // - 1열(세로)일 땐 y 기준
+      // - 2~3열일 땐 같은 행(row) 판단 후 x 기준(행이 다르면 y 우선)
+      const rects = children
+        .map((el) => ({ el, rect: el.getBoundingClientRect() }))
+        .filter((x) => x.rect.width > 0 && x.rect.height > 0);
+      if (rects.length === 0) {
+        m.grid.appendChild(ph);
+        return;
+      }
+
+      const vw = window.innerWidth || 0;
+      const isSingleCol = vw <= 900; // CSS에서 모바일은 1열 고정
+      let best = rects[0];
+      let bestScore = Number.POSITIVE_INFINITY;
+      for (const r of rects) {
+        const cx = r.rect.left + r.rect.width / 2;
+        const cy = r.rect.top + r.rect.height / 2;
+        const dx = clientX - cx;
+        const dy = clientY - cy;
+        const score = dx * dx + dy * dy;
+        if (score < bestScore) {
+          bestScore = score;
+          best = r;
+        }
+      }
+
+      const targetRect = best.rect;
+      const midX = targetRect.left + targetRect.width / 2;
+      const midY = targetRect.top + targetRect.height / 2;
+      const before = isSingleCol ? clientY < midY : clientX < midX;
+
+      if (before) best.el.before(ph);
+      else best.el.after(ph);
+    };
+
     const onPointerDown = (ev) => {
       const item = getItemElFromTarget(ev.target);
       if (!item) return;
@@ -576,6 +621,8 @@ function openCompareModal(restaurants) {
       // placeholder가 "원래 자리"를 대체해야 자연스럽습니다.
       // item을 그대로 두고 placeholder를 추가로 넣으면 칸이 하나 더 생겨 보입니다.
       item.replaceWith(ph);
+      // 클릭 직후에도 "포인터 기준 변경 구역"이 바로 보이게
+      movePlaceholderToPointer(startX, startY);
 
       ghost = createGhostFromItem(item);
       ghost.classList.add('picked');
@@ -606,20 +653,11 @@ function openCompareModal(restaurants) {
           ghost.style.opacity = String(op);
           ghost.style.transform = `translate3d(${e.clientX + offsetX}px,${e.clientY + offsetY}px,0) scale(${s})`;
         }
-
         const over = document.elementFromPoint(e.clientX, e.clientY);
         const overGrid = over instanceof HTMLElement ? over.closest('.compare-grid') : null;
-        const overItem = getItemElFromTarget(over);
-
-        if (overGrid && overItem && overItem !== item) {
-          // placeholder를 대상 item 앞/뒤로 이동
-          const overRect = overItem.getBoundingClientRect();
-          const before = e.clientX < overRect.left + overRect.width / 2;
-          if (before) overItem.before(ph);
-          else overItem.after(ph);
-        } else if (overGrid && !overItem) {
-          // grid 빈 공간이면 맨 뒤로
-          overGrid.appendChild(ph);
+        if (overGrid) {
+          // 포인터 좌표로 placeholder 위치를 계산(항상 커서 기준으로 "변경 구역"이 따라오게)
+          movePlaceholderToPointer(e.clientX, e.clientY);
         }
       };
 
