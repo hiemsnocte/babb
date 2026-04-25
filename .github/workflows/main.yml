@@ -11,8 +11,12 @@ on:
       - 'public/**'
       - '.github/workflows/main.yml'
   schedule:
-    # 2시간 간격으로 실행 (하루 12회)
-    - cron: '17 */2 * * *'
+    # 메뉴 캡처 (UTC cron)
+    # - KST 03:00~12:00: 매시간 +17분(정각 회피) = UTC 18~23,0~3 시각 +17분
+    # - KST 13:00 이후: 3시간 단위 +41분 = UTC 4,7,10,13 시각 +41분
+    - cron: '17 18-23 * * *'
+    - cron: '17 0-3 * * *'
+    - cron: '41 4,7,10,13 * * *'
   workflow_dispatch:
 
 permissions:

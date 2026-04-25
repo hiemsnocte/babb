@@ -38,20 +38,22 @@ const db = getFirestore(app);
 
 const loadingEl = document.getElementById('loading');
 const errorEl = document.getElementById('error');
-const dateLine = document.getElementById('date-line');
 const updatedLine = document.getElementById('updated-line');
 const menusEl = document.getElementById('menus');
 const debugEl = document.getElementById('debug');
 const DEBUG_ENABLED = new URLSearchParams(window.location.search).has('debug');
+const ghFooter = document.getElementById('gh-footer');
+if (ghFooter) ghFooter.hidden = !DEBUG_ENABLED;
 
 let lastRenderedRestaurants = [];
 
 function ensureImageModal() {
   let root = document.getElementById('image-modal');
   if (root) {
+    const panel = root.querySelector('.image-modal-panel');
     const img = root.querySelector('img');
-    const closeBtn = root.querySelector('button');
-    return { root, img, closeBtn };
+    const closeBtn = root.querySelector('button.image-modal-close');
+    return { root, panel, img, closeBtn };
   }
 
   root = document.createElement('div');
@@ -75,6 +77,180 @@ function ensureImageModal() {
   root.appendChild(panel);
   document.body.appendChild(root);
 
+  const isPc =
+    window.matchMedia &&
+    window.matchMedia('(pointer: fine)').matches &&
+    !window.matchMedia('(max-width: 900px)').matches;
+  let blockCloseUntil = 0;
+  const touchCloseBlock = () => {
+    blockCloseUntil = Date.now() + 1000;
+  };
+
+  const fitPanelToImage = () => {
+    if (!isPc) return;
+    const nw = Number(img.naturalWidth) || 0;
+    const nh = Number(img.naturalHeight) || 0;
+    if (nw <= 0 || nh <= 0) return;
+    const aspect = nw / nh;
+    const gutter = 24; // panel padding(12px*2)
+    const maxW = Math.max(0, Math.floor(window.innerWidth * 0.96) - gutter);
+    const maxH = Math.max(0, Math.floor(window.innerHeight * 0.92) - gutter);
+    const minW = 520;
+    const minH = 420;
+
+    let w = maxW;
+    let h = Math.round(w / aspect);
+    if (h > maxH) {
+      h = maxH;
+      w = Math.round(h * aspect);
+    }
+    if (w < minW) {
+      w = minW;
+      h = Math.round(w / aspect);
+    }
+    if (h < minH) {
+      h = minH;
+      w = Math.round(h * aspect);
+    }
+    // 최종적으로 화면 범위 내로
+    if (w > maxW) {
+      w = maxW;
+      h = Math.round(w / aspect);
+    }
+    if (h > maxH) {
+      h = maxH;
+      w = Math.round(h * aspect);
+    }
+
+    panel.style.width = `${w + gutter}px`;
+    panel.style.height = `${h + gutter}px`;
+  };
+
+  if (isPc) {
+    const dirs = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
+    for (const d of dirs) {
+      const h = document.createElement('div');
+      h.className = `modal-resize-handle ${d}`;
+      h.dataset.dir = d;
+      panel.appendChild(h);
+    }
+
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+    const startResize = (ev, dir) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      touchCloseBlock();
+
+      const rect = panel.getBoundingClientRect();
+      const startW = rect.width;
+      const startH = rect.height;
+      const aspect = startW / startH || 1;
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+
+      const sx = dir.includes('e') ? 1 : dir.includes('w') ? -1 : 0;
+      const sy = dir.includes('s') ? 1 : dir.includes('n') ? -1 : 0;
+
+      const vwMax = Math.floor(window.innerWidth * 0.96);
+      const vhMax = Math.floor(window.innerHeight * 0.92);
+      const gutter = 24; // panel padding(12px*2)
+      const minW = 520;
+      const minH = 420;
+      const vwMaxInner = Math.max(0, vwMax - gutter);
+      const vhMaxInner = Math.max(0, vhMax - gutter);
+
+      let moved = false;
+      const onMove = (e) => {
+        moved = true;
+        touchCloseBlock();
+        const dx = (e.clientX - startX) * sx;
+        const dy = (e.clientY - startY) * sy;
+
+        let nextW = startW;
+        let nextH = startH;
+        if (dir === 'n' || dir === 's') {
+          nextH = Math.round(startH + dy);
+          nextH = Math.max(minH + gutter, Math.min(vhMax, nextH));
+        } else {
+          const scaleX = sx !== 0 ? (startW + dx) / startW : 1;
+          const scaleY = sy !== 0 ? (startH + dy) / startH : 1;
+          let scale = Math.max(scaleX, scaleY);
+          scale = clamp(scale, 0.85, 1.9);
+          nextW = Math.round(startW * scale);
+          nextH = Math.round(nextW / aspect);
+
+          if (nextW < minW + gutter) {
+            nextW = minW + gutter;
+            nextH = Math.round(nextW / aspect);
+          }
+          if (nextH < minH + gutter) {
+            nextH = minH + gutter;
+            nextW = Math.round(nextH * aspect);
+          }
+          if (nextW > vwMax) {
+            nextW = vwMax;
+            nextH = Math.round(nextW / aspect);
+          }
+          if (nextH > vhMax) {
+            nextH = vhMax;
+            nextW = Math.round(nextH * aspect);
+          }
+        }
+
+        panel.style.width = `${nextW}px`;
+        panel.style.height = `${nextH}px`;
+      };
+      const onUp = () => {
+        touchCloseBlock();
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+        if (moved) touchCloseBlock();
+      };
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', onUp, true);
+    };
+
+    panel.addEventListener(
+      'pointerdown',
+      (ev) => {
+        const t = ev.target;
+        if (!(t instanceof HTMLElement)) return;
+        if (!t.classList.contains('modal-resize-handle')) return;
+        const dir = t.dataset.dir || '';
+        if (!dir) return;
+        startResize(ev, dir);
+      },
+      true,
+    );
+
+    panel.addEventListener(
+      'dblclick',
+      (ev) => {
+        const t = ev.target;
+        if (!(t instanceof HTMLElement)) return;
+        if (!t.classList.contains('modal-resize-handle')) return;
+        const dir = t.dataset.dir || '';
+        if (dir !== 'ne' && dir !== 'nw' && dir !== 'se' && dir !== 'sw') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        touchCloseBlock();
+        fitPanelToImage();
+      },
+      true,
+    );
+
+    root.addEventListener(
+      'click',
+      () => {
+        if (Date.now() < blockCloseUntil) return;
+        root.classList.remove('on');
+        img.removeAttribute('src');
+      },
+      true,
+    );
+  }
+
   const close = () => {
     root.classList.remove('on');
     img.removeAttribute('src');
@@ -83,13 +259,18 @@ function ensureImageModal() {
     ev.stopPropagation();
     close();
   });
-  root.addEventListener('click', () => close());
+  if (!isPc) root.addEventListener('click', () => close());
   panel.addEventListener('click', (ev) => ev.stopPropagation());
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') close();
   });
 
-  return { root, img, closeBtn };
+  img.addEventListener('load', () => {
+    // 새 이미지 로드시 기본 '딱 맞춤'으로 잡아줌(아래 잘림 방지)
+    fitPanelToImage();
+  });
+
+  return { root, panel, img, closeBtn };
 }
 
 function openImageModal(src, altText) {
@@ -103,8 +284,9 @@ function ensureCompareModal() {
   let root = document.getElementById('compare-modal');
   if (root) {
     const grid = root.querySelector('.compare-grid');
+    const panel = root.querySelector('.compare-modal-panel');
     const closeBtn = root.querySelector('button.image-modal-close');
-    return { root, grid, closeBtn };
+    return { root, panel, grid, closeBtn };
   }
 
   root = document.createElement('div');
@@ -128,44 +310,370 @@ function ensureCompareModal() {
   root.appendChild(panel);
   document.body.appendChild(root);
 
+  // 테두리/코너 리사이즈 핸들(PC 전용). 크기는 "대각선(비율 유지)"으로만 조정.
+  const isPc =
+    window.matchMedia &&
+    window.matchMedia('(pointer: fine)').matches &&
+    !window.matchMedia('(max-width: 900px)').matches;
+  let blockCloseUntil = 0;
+  const touchCloseBlock = () => {
+    blockCloseUntil = Date.now() + 1000;
+  };
+  if (isPc) {
+    const dirs = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
+    for (const d of dirs) {
+      const h = document.createElement('div');
+      h.className = `modal-resize-handle ${d}`;
+      h.dataset.dir = d;
+      panel.appendChild(h);
+    }
+
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+    const startResize = (ev, dir) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      touchCloseBlock();
+
+      const rect = panel.getBoundingClientRect();
+      const startW = rect.width;
+      const startH = rect.height;
+      const aspect = startW / startH || 1;
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+
+      const sx = dir.includes('e') ? 1 : dir.includes('w') ? -1 : 0;
+      const sy = dir.includes('s') ? 1 : dir.includes('n') ? -1 : 0;
+
+      let moved = false;
+      const onMove = (e) => {
+        moved = true;
+        touchCloseBlock();
+        const dx = (e.clientX - startX) * sx;
+        const dy = (e.clientY - startY) * sy;
+        const vwMax = Math.floor(window.innerWidth * 0.96);
+        const vhMax = Math.floor(window.innerHeight * 0.92);
+        const minW = 920;
+        const minH = 520;
+
+        // 상/하는 "세로만" 조정. 나머지(좌/우/코너)는 "대각선(비율 유지)".
+        let nextW = startW;
+        let nextH = startH;
+        if (dir === 'n' || dir === 's') {
+          nextH = Math.round(startH + dy);
+          nextH = Math.max(minH, Math.min(vhMax, nextH));
+        } else {
+          // "대각선 크기만" 바뀌게: 가로/세로 중 더 크게 요구되는 스케일을 채택
+          const scaleX = sx !== 0 ? (startW + dx) / startW : 1;
+          const scaleY = sy !== 0 ? (startH + dy) / startH : 1;
+          let scale = Math.max(scaleX, scaleY);
+          scale = clamp(scale, 0.85, 1.75);
+
+          nextW = Math.round(startW * scale);
+          nextH = Math.round(nextW / aspect);
+
+          // 상한/하한 + 비율 유지 보정
+          if (nextW < minW) {
+            nextW = minW;
+            nextH = Math.round(nextW / aspect);
+          }
+          if (nextH < minH) {
+            nextH = minH;
+            nextW = Math.round(nextH * aspect);
+          }
+          if (nextW > vwMax) {
+            nextW = vwMax;
+            nextH = Math.round(nextW / aspect);
+          }
+          if (nextH > vhMax) {
+            nextH = vhMax;
+            nextW = Math.round(nextH * aspect);
+          }
+        }
+
+        panel.style.width = `${nextW}px`;
+        panel.style.height = `${nextH}px`;
+      };
+      const onUp = (e) => {
+        touchCloseBlock();
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+        if (moved) {
+          // 리사이즈 직후 1초는 바깥 클릭으로 닫히지 않게
+          touchCloseBlock();
+        }
+      };
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', onUp, true);
+    };
+
+    panel.addEventListener(
+      'pointerdown',
+      (ev) => {
+        const t = ev.target;
+        if (!(t instanceof HTMLElement)) return;
+        if (!t.classList.contains('modal-resize-handle')) return;
+        const dir = t.dataset.dir || '';
+        if (!dir) return;
+        startResize(ev, dir);
+      },
+      true,
+    );
+
+    // 패널 클릭(리사이즈 포함) 후 1초간은 외부 클릭으로 닫힘 방지
+    panel.addEventListener('pointerdown', () => touchCloseBlock(), true);
+    root.addEventListener(
+      'click',
+      () => {
+        if (Date.now() < blockCloseUntil) return;
+        root.classList.remove('on');
+      },
+      true,
+    );
+  }
+
   const close = () => root.classList.remove('on');
   closeBtn.addEventListener('click', (ev) => {
     ev.stopPropagation();
     close();
   });
-  root.addEventListener('click', () => close());
+  if (!isPc) {
+    root.addEventListener('click', () => close());
+  }
   panel.addEventListener('click', (ev) => ev.stopPropagation());
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape') close();
   });
 
-  return { root, grid, closeBtn };
+  return { root, panel, grid, closeBtn };
 }
 
 function openCompareModal(restaurants) {
   const m = ensureCompareModal();
-  m.grid.innerHTML = '';
   const list = Array.isArray(restaurants) ? restaurants : [];
   const order = ['beoksan', 'theeats', 'bombom'];
   const byId = new Map(list.map((r) => [r.id, r]));
   const sorted = order.map((id) => byId.get(id)).filter(Boolean);
-  const finalList = sorted.length > 0 ? sorted : list;
+  let finalList = (sorted.length > 0 ? sorted : list).filter(
+    (r) => r && typeof r.imageUrl === 'string' && r.imageUrl.length > 0,
+  );
 
-  for (const r of finalList) {
-    const item = document.createElement('div');
-    item.className = 'compare-item';
-    const cap = document.createElement('div');
-    cap.className = 'cap';
-    cap.textContent = r.name || r.id || '메뉴';
-    const img = document.createElement('img');
-    img.alt = `${cap.textContent} 메뉴`;
-    img.decoding = 'async';
-    img.loading = 'lazy';
-    img.src = r.imageUrl;
-    item.appendChild(cap);
-    item.appendChild(img);
-    m.grid.appendChild(item);
+  const isPc =
+    window.matchMedia &&
+    window.matchMedia('(pointer: fine)').matches &&
+    !window.matchMedia('(max-width: 900px)').matches;
+
+  const setCols = () => {
+    const n = finalList.length;
+    m.grid.classList.remove('cols-1', 'cols-2', 'cols-3');
+    m.grid.classList.add(n <= 1 ? 'cols-1' : n === 2 ? 'cols-2' : 'cols-3');
+  };
+
+  const fitPanelToCount = () => {
+    if (!isPc || !m.panel) return;
+    const n = finalList.length;
+    const vwMax = Math.floor(window.innerWidth * 0.96);
+    const vhMax = Math.floor(window.innerHeight * 0.92);
+    const minW = n <= 1 ? 720 : n === 2 ? 980 : 1400;
+    const minH = 520;
+    const w = Math.min(vwMax, minW);
+    const h = Math.min(vhMax, Math.max(minH, 620));
+    m.panel.style.width = `${w}px`;
+    m.panel.style.height = `${h}px`;
+  };
+
+  const render = () => {
+    m.grid.innerHTML = '';
+    setCols();
+    for (let idx = 0; idx < finalList.length; idx += 1) {
+      const r = finalList[idx];
+      const item = document.createElement('div');
+      item.className = 'compare-item';
+      item.dataset.id = String(r.id || idx);
+      const cap = document.createElement('div');
+      cap.className = 'cap';
+      cap.textContent = r.name || r.id || '메뉴';
+      const img = document.createElement('img');
+      img.alt = `${cap.textContent} 메뉴`;
+      img.decoding = 'async';
+      img.loading = 'lazy';
+      img.src = r.imageUrl;
+      item.appendChild(cap);
+      item.appendChild(img);
+      m.grid.appendChild(item);
+    }
+  };
+
+  render();
+
+  // PC에서만 드래그 재정렬/제외 제공
+  if (isPc) {
+    let draggingId = null;
+    let placeholder = null;
+    let ghost = null;
+
+    const getItemElFromTarget = (t) => {
+      if (!(t instanceof HTMLElement)) return null;
+      return t.closest('.compare-item');
+    };
+
+    const ensurePlaceholder = () => {
+      if (placeholder && placeholder.parentNode) return placeholder;
+      placeholder = document.createElement('div');
+      placeholder.className = 'compare-placeholder';
+      return placeholder;
+    };
+
+    const indexById = (id) => finalList.findIndex((r) => String(r.id) === String(id));
+
+    const moveItem = (from, to) => {
+      if (from === to || from < 0 || to < 0) return;
+      const next = finalList.slice();
+      const [it] = next.splice(from, 1);
+      next.splice(to, 0, it);
+      finalList = next;
+    };
+
+    const removeItem = (idx) => {
+      if (idx < 0 || idx >= finalList.length) return;
+      finalList = finalList.filter((_, i) => i !== idx);
+    };
+
+    const createGhostFromItem = (itemEl) => {
+      const g = document.createElement('div');
+      g.className = 'compare-drag-ghost';
+      // 복제본으로 고스트를 만들면 "왼쪽 위에서 가져오는" 점프가 줄고 DOM 재배치도 없음
+      const clone = itemEl.cloneNode(true);
+      if (clone instanceof HTMLElement) clone.classList.remove('dragging');
+      g.appendChild(clone);
+      document.body.appendChild(g);
+      return g;
+    };
+
+    const cleanupDrag = () => {
+      draggingId = null;
+      for (const el of m.grid.querySelectorAll('.compare-item.dragging')) {
+        el.classList.remove('dragging');
+      }
+      if (placeholder && placeholder.parentNode) placeholder.remove();
+      if (ghost && ghost.parentNode) ghost.remove();
+      ghost = null;
+    };
+
+    const onPointerDown = (ev) => {
+      const item = getItemElFromTarget(ev.target);
+      if (!item) return;
+      // 캡션/이미지 아무데나 잡아도 드래그 가능
+      draggingId = item.dataset.id || null;
+      if (!draggingId) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const ph = ensurePlaceholder();
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+      item.classList.add('dragging');
+
+      // placeholder가 "원래 자리"를 대체해야 자연스럽습니다.
+      // item을 그대로 두고 placeholder를 추가로 넣으면 칸이 하나 더 생겨 보입니다.
+      item.replaceWith(ph);
+
+      ghost = createGhostFromItem(item);
+      ghost.classList.add('picked');
+      // 최초 프레임: transition 없이 커서 위치로 "즉시" 배치 → 왼쪽 위에서 오는 모션 방지
+      const offsetX = 18;
+      const offsetY = 18;
+      ghost.style.transition = 'none';
+      ghost.style.transform = `translate3d(${startX + offsetX}px,${startY + offsetY}px,0) scale(1)`;
+      ghost.style.opacity = '0';
+      // 다음 프레임부터 transition 활성화
+      window.requestAnimationFrame(() => {
+        if (!ghost) return;
+        ghost.classList.add('ready');
+      });
+
+      const onMove = (e) => {
+        // 모달에서 멀어질수록 축소/페이드(밖으로 뺄 때 사라지는 느낌)
+        const panelRect = m.panel ? m.panel.getBoundingClientRect() : null;
+        let dist = 0;
+        if (panelRect) {
+          const cx = Math.max(panelRect.left, Math.min(e.clientX, panelRect.right));
+          const cy = Math.max(panelRect.top, Math.min(e.clientY, panelRect.bottom));
+          dist = Math.hypot(e.clientX - cx, e.clientY - cy);
+        }
+        const s = Math.max(0.15, Math.min(1, 1 - dist / 520));
+        const op = Math.max(0.05, Math.min(1, 1 - dist / 320));
+        if (ghost) {
+          ghost.style.opacity = String(op);
+          ghost.style.transform = `translate3d(${e.clientX + offsetX}px,${e.clientY + offsetY}px,0) scale(${s})`;
+        }
+
+        const over = document.elementFromPoint(e.clientX, e.clientY);
+        const overGrid = over instanceof HTMLElement ? over.closest('.compare-grid') : null;
+        const overItem = getItemElFromTarget(over);
+
+        if (overGrid && overItem && overItem !== item) {
+          // placeholder를 대상 item 앞/뒤로 이동
+          const overRect = overItem.getBoundingClientRect();
+          const before = e.clientX < overRect.left + overRect.width / 2;
+          if (before) overItem.before(ph);
+          else overItem.after(ph);
+        } else if (overGrid && !overItem) {
+          // grid 빈 공간이면 맨 뒤로
+          overGrid.appendChild(ph);
+        }
+      };
+
+      const onUp = (e) => {
+        const over = document.elementFromPoint(e.clientX, e.clientY);
+        const overGrid = over instanceof HTMLElement ? over.closest('.compare-grid') : null;
+        const phIndex =
+          placeholder && placeholder.parentNode ? [...m.grid.children].indexOf(placeholder) : -1;
+        const fromIdx = indexById(draggingId);
+
+        if (!overGrid) {
+          // 밖으로 드랍: 제거
+          if (fromIdx >= 0) removeItem(fromIdx);
+        } else if (phIndex >= 0 && fromIdx >= 0) {
+          // 재정렬
+          moveItem(fromIdx, phIndex);
+        }
+
+        item.classList.remove('dragging');
+        cleanupDrag();
+        render();
+        // 자동 축소는 제거. 대신 코너 더블클릭으로 '딱 맞춤' 제공
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+      };
+
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', onUp, true);
+    };
+
+    // 중복 바인딩 방지: 이전 핸들러가 있으면 제거
+    if (m.grid._compareDragBound) {
+      m.grid.removeEventListener('pointerdown', m.grid._compareDragBound, true);
+    }
+    m.grid._compareDragBound = onPointerDown;
+    m.grid.addEventListener('pointerdown', onPointerDown, true);
+
+    // 코너(리사이즈 핸들) 더블클릭 시 현재 개수에 맞게 패널 크기 추천값으로 맞춤
+    if (m.panel && !m.panel._compareFitBound) {
+      const onDbl = (ev) => {
+        const t = ev.target;
+        if (!(t instanceof HTMLElement)) return;
+        if (!t.classList.contains('modal-resize-handle')) return;
+        const dir = t.dataset.dir || '';
+        if (dir !== 'ne' && dir !== 'nw' && dir !== 'se' && dir !== 'sw') return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        fitPanelToCount();
+      };
+      m.panel._compareFitBound = onDbl;
+      m.panel.addEventListener('dblclick', onDbl, true);
+    }
   }
+
   m.root.classList.add('on');
 }
 
@@ -297,7 +805,6 @@ function showError(message) {
   errorEl.hidden = false;
   errorEl.textContent = message;
   updatedLine.hidden = true;
-  dateLine.hidden = true;
   menusEl.innerHTML = '';
   if (debugEl) debugEl.hidden = true;
 }
@@ -593,6 +1100,16 @@ function renderMenus(restaurants) {
       scheduleMergePersist(emoji, v - cur);
     }
 
+    // 왕관(3~5단계)일수록 '묵직'하게(충돌에 덜 튕김)
+    function crownMassFactorForBall(b) {
+      if (!b) return 1;
+      if (!isCrownBall(b)) return 1;
+      const lvl = getCrownLevelForEmoji(b.emoji);
+      if (lvl < 3) return 1;
+      // 3:~1.35, 4:~1.7, 5:~2.05
+      return Math.max(1, Math.min(2.2, 1 + (lvl - 2) * 0.35));
+    }
+
     function prefersReducedMotion() {
       return (
         window.matchMedia &&
@@ -819,19 +1336,21 @@ function renderMenus(restaurants) {
       const cx = A.x + A.w / 2 - (B.x + B.w / 2);
       const cy = A.y + A.h / 2 - (B.y + B.h / 2);
       const d = Math.hypot(cx, cy) || 1;
+      const mA = crownMassFactorForBall(A);
+      const mB = crownMassFactorForBall(B);
       const push = 4;
-      A.x += (cx / d) * push;
-      A.y += (cy / d) * push;
-      B.x -= (cx / d) * push;
-      B.y -= (cy / d) * push;
+      A.x += (cx / d) * (push / mA);
+      A.y += (cy / d) * (push / mA);
+      B.x -= (cx / d) * (push / mB);
+      B.y -= (cy / d) * (push / mB);
       A.x = Math.max(0, Math.min(W - A.w, A.x));
       A.y = Math.max(0, Math.min(H - A.h, A.y));
       B.x = Math.max(0, Math.min(W - B.w, B.x));
       B.y = Math.max(0, Math.min(H - B.h, B.y));
-      A.vx += (cx / d) * 1.2;
-      A.vy += (cy / d) * 1.2;
-      B.vx -= (cx / d) * 1.2;
-      B.vy -= (cy / d) * 1.2;
+      A.vx += (cx / d) * (1.2 / mA);
+      A.vy += (cy / d) * (1.2 / mA);
+      B.vx -= (cx / d) * (1.2 / mB);
+      B.vy -= (cy / d) * (1.2 / mB);
     }
 
     function scheduleMergePersist(emoji, delta) {
@@ -1065,11 +1584,13 @@ function renderMenus(restaurants) {
       const dx = winner.x + winner.w / 2 - (loser.x + loser.w / 2);
       const dy = winner.y + winner.h / 2 - (loser.y + loser.h / 2);
       const d = Math.hypot(dx, dy) || 1;
+      const mw = crownMassFactorForBall(winner);
       const push = 5;
-      winner.x += (dx / d) * push;
-      winner.y += (dy / d) * push;
-      winner.vx += (dx / d) * 2.4;
-      winner.vy += (dy / d) * 2.4;
+      // 묵직한 왕관(3~5단계)은 충돌 후 덜 튕기게(위치/속도 변화량 감소)
+      winner.x += (dx / d) * (push / mw);
+      winner.y += (dy / d) * (push / mw);
+      winner.vx += (dx / d) * (2.4 / mw);
+      winner.vy += (dy / d) * (2.4 / mw);
       winner.x = Math.max(0, Math.min(W - winner.w, winner.x));
       winner.y = Math.max(0, Math.min(H - winner.h, winner.y));
 
@@ -1558,16 +2079,9 @@ function showData(data) {
   // 카드 렌더링에서 쓸 날짜(리셋/저장 키용)
   window.__BABB_DATE__ = dateStr || '';
 
-  if (dateStr) {
-    dateLine.hidden = false;
-    dateLine.textContent = `기준일: ${dateStr}`;
-  } else {
-    dateLine.hidden = true;
-  }
-
   if (updatedStr) {
     updatedLine.hidden = false;
-    updatedLine.textContent = `DB 갱신 시각: ${updatedStr}`;
+    updatedLine.textContent = `갱신일: ${updatedStr}`;
   } else {
     updatedLine.hidden = true;
   }

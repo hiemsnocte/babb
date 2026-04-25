@@ -2,8 +2,8 @@ name: Daily cleanup (emoji/comments)
 
 on:
   schedule:
-    # 2시간 간격으로 실행 (하루 12회)
-    - cron: '23 */2 * * *'
+    # 3시간 간격으로 실행
+    - cron: '23 */3 * * *'
   workflow_dispatch:
 
 permissions:
