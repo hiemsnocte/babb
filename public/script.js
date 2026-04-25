@@ -5,6 +5,7 @@
  * - imageUrl: string (구버전 호환)
  * - date (선택)
  * - updatedAt (선택: Firestore Timestamp)
+ * - restaurants/{rid}: emojiCounts(누적 투표), sacrificedEmojiCounts(흡수+패배 희생 누적), emojiCrownMerge
  */
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
 import {
@@ -44,7 +45,16 @@ const debugEl = document.getElementById('debug');
 const DEBUG_ENABLED = new URLSearchParams(window.location.search).has('debug');
 
 const EMOJIS = ['😍', '😋', '🤔', '😑', '😒', '😡', '🤬'];
-const DANMAKU_REPEAT_LIMIT = 10;
+/** 단마쿠 가로 이동 속도(px/s). 짧은 글·긴 글 모두 같은 속도로 우→좌 전체 횡단 */
+const DANMAKU_PX_PER_SEC_MIN = 48;
+const DANMAKU_PX_PER_SEC_MAX = 68;
+/** 이모지 종류당 튕기는 공 최대 개수(투표 폭주 시 부하 제한) */
+const PINBALL_MAX_PER_EMOJI = 5;
+/** 왕관 이모지가 같은 종류를 흡수해 커지는 단계 상한(흡수 5회 = 최대 크기, 이후 동일 종류 추가 흡수 없음) */
+const CROWN_ABSORB_CAP = 5;
+/** rAF 한 프레임당 대략 이동량(px). 값이 클수록 빠름 */
+const PINBALL_SPEED_MIN = 1.1;
+const PINBALL_SPEED_MAX = 2.4;
 
 function todayDateKorea() {
   return new Intl.DateTimeFormat('en-CA', {
@@ -145,22 +155,6 @@ function randomColor() {
   return palette[Math.floor(Math.random() * palette.length)];
 }
 
-function scheduleResetAtKstMidnight() {
-  // Firestore는 date 필드 기준으로 "오늘 메뉴"만 보여주고,
-  // 클라이언트쪽 반복 제한 카운터만 KST 24:00에 리셋합니다.
-  const now = new Date();
-  const nowKst = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
-  const next = new Date(nowKst);
-  next.setHours(24, 0, 0, 0);
-  const ms = Math.max(1000, next.getTime() - nowKst.getTime());
-  setTimeout(() => {
-    window.__BABB_DANMAKU_SEEN__ = {};
-    scheduleResetAtKstMidnight();
-  }, ms);
-}
-window.__BABB_DANMAKU_SEEN__ = {};
-scheduleResetAtKstMidnight();
-
 function formatFirestoreTime(value) {
   if (!value) return '';
   if (typeof value.toDate === 'function') {
@@ -203,6 +197,18 @@ function showDebug(data, renderedRestaurants) {
 }
 
 function renderMenus(restaurants) {
+  const cleanups = window.__BABB_PINBALL_CLEANUPS__;
+  if (Array.isArray(cleanups)) {
+    for (const fn of cleanups) {
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  window.__BABB_PINBALL_CLEANUPS__ = [];
+
   menusEl.innerHTML = '';
   for (const r of restaurants) {
     const card = document.createElement('section');
@@ -219,6 +225,10 @@ function renderMenus(restaurants) {
 
     const wrap = document.createElement('div');
     wrap.className = 'img-wrap';
+
+    const pinballLayer = document.createElement('div');
+    pinballLayer.className = 'emoji-pinball';
+    pinballLayer.setAttribute('aria-hidden', 'true');
 
     const danmaku = document.createElement('div');
     danmaku.className = 'danmaku';
@@ -251,6 +261,7 @@ function renderMenus(restaurants) {
     actions.appendChild(commentRow);
 
     wrap.appendChild(img);
+    wrap.appendChild(pinballLayer);
     wrap.appendChild(danmaku);
     wrap.appendChild(actions);
     card.appendChild(title);
@@ -262,42 +273,682 @@ function renderMenus(restaurants) {
     const dateStr = todayDateKorea();
 
     const rid = r.id || titleLeft.textContent;
-    let state = { emojiCounts: {}, comments: [] };
+    let state = {
+      emojiCounts: {},
+      sacrificedEmojiCounts: {},
+      emojiCrownMerge: {},
+      comments: [],
+    };
 
-    // 공유 데이터 경로:
-    // menus/current/restaurants/{rid} : emojiCounts 맵
-    // menus/current/restaurants/{rid}/comments : 코멘트 스트림
     const restaurantDocRef = doc(db, 'menus', 'current', 'restaurants', rid);
     const commentsColRef = collection(db, 'menus', 'current', 'restaurants', rid, 'comments');
 
+    /** @type {{ id: string; birthSeq: number; el: HTMLElement; emoji: string; x: number; y: number; vx: number; vy: number; w: number; h: number }[]} */
+    let pinballs = [];
+    let pinballRafId = null;
+    let pinballLayoutAttempts = 0;
+    let pinballBirthSeq = 0;
+
+    /** 희생(sacrificedEmojiCounts) ack 전 배치 */
+    let sacrificePersistTimer = null;
+    const sacrificePersistPending = {};
+    let mergePersistTimer = null;
+    const mergePersistPending = {};
+
+    function stopPinballLoop() {
+      if (pinballRafId != null) {
+        cancelAnimationFrame(pinballRafId);
+        pinballRafId = null;
+      }
+    }
+
+    function createPinballBall(emoji, W, H) {
+      pinballBirthSeq += 1;
+      const id =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `pb_${rid}_${pinballBirthSeq}_${Math.random().toString(36).slice(2)}`;
+      const el = document.createElement('div');
+      el.className = 'emoji-pinball-ball';
+      const faceEl = document.createElement('span');
+      faceEl.className = 'emoji-pinball-face';
+      faceEl.textContent = emoji;
+      const crownEl = document.createElement('span');
+      crownEl.className = 'emoji-pinball-crown';
+      crownEl.textContent = '👑';
+      crownEl.setAttribute('aria-hidden', 'true');
+      crownEl.hidden = true;
+      el.appendChild(faceEl);
+      el.appendChild(crownEl);
+      pinballLayer.appendChild(el);
+      const w0 = Math.max(el.offsetWidth, 20);
+      const h0 = Math.max(el.offsetHeight, 20);
+      const speed =
+        PINBALL_SPEED_MIN + Math.random() * (PINBALL_SPEED_MAX - PINBALL_SPEED_MIN);
+      const angle = Math.random() * Math.PI * 2;
+      let vx = Math.cos(angle) * speed;
+      let vy = Math.sin(angle) * speed;
+      if (Math.abs(vx) < 0.35) vx += vx >= 0 ? 0.5 : -0.5;
+      if (Math.abs(vy) < 0.35) vy += vy >= 0 ? 0.5 : -0.5;
+      const x = Math.random() * Math.max(1, W - w0);
+      const y = Math.random() * Math.max(1, H - h0);
+      el.style.transform = `translate3d(${x}px,${y}px,0)`;
+      return {
+        id,
+        birthSeq: pinballBirthSeq,
+        el,
+        faceEl,
+        crownEl,
+        _lastVisualLvl: null,
+        _lastVisualCrown: null,
+        emoji,
+        x,
+        y,
+        vx,
+        vy,
+        w: w0,
+        h: h0,
+      };
+    }
+
+    function countPinballsForEmoji(emoji) {
+      return pinballs.filter((b) => b.emoji === emoji).length;
+    }
+
+    function getCrownBallForEmoji(emoji) {
+      const list = pinballs.filter((b) => b.emoji === emoji);
+      if (list.length === 0) return null;
+      return list.reduce((a, c) => (c.birthSeq < a.birthSeq ? c : a));
+    }
+
+    function isCrownBall(b) {
+      const c = getCrownBallForEmoji(b.emoji);
+      return !!c && c.id === b.id;
+    }
+
+    function getCrownLevelForEmoji(emoji) {
+      return Math.min(
+        CROWN_ABSORB_CAP,
+        Math.max(0, Math.floor(Number(state.emojiCrownMerge[emoji]) || 0)),
+      );
+    }
+
+    function setCrownLevelForEmoji(emoji, next) {
+      const v = Math.min(CROWN_ABSORB_CAP, Math.max(0, Math.floor(Number(next) || 0)));
+      const cur = getCrownLevelForEmoji(emoji);
+      if (v === cur) return;
+      state.emojiCrownMerge = { ...state.emojiCrownMerge, [emoji]: v };
+      scheduleMergePersist(emoji, v - cur);
+    }
+
+    function prefersReducedMotion() {
+      return (
+        window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      );
+    }
+
+    function animateEvolution(el, kind) {
+      if (!el || prefersReducedMotion()) return;
+      // kind: 'up' | 'down'
+      const isCrownEl =
+        el.classList && el.classList.contains && el.classList.contains('emoji-pinball-crown');
+      // 왕관은 가운데 정렬을 transform(translate)로 하고 있어서,
+      // 애니메이션에서 transform을 덮어쓰면 잠깐 오른쪽으로 밀리는 현상이 생김.
+      // -> translate는 유지하고 scale만 바뀌도록 keyframes를 구성한다.
+      const baseT = isCrownEl ? 'translate(var(--crown-tx), var(--crown-ty)) ' : '';
+      const kf =
+        kind === 'down'
+          ? [
+              { transform: `${baseT}scale(1)`, filter: 'blur(0px)', opacity: 1 },
+              { transform: `${baseT}scale(0.92)`, filter: 'blur(0.6px)', opacity: 0.98 },
+              { transform: `${baseT}scale(1.03)`, filter: 'blur(0px)', opacity: 1 },
+              { transform: `${baseT}scale(1)`, filter: 'blur(0px)', opacity: 1 },
+            ]
+          : [
+              { transform: `${baseT}scale(1)`, filter: 'blur(0px)', opacity: 1 },
+              { transform: `${baseT}scale(1.14)`, filter: 'blur(0.4px)', opacity: 1 },
+              { transform: `${baseT}scale(0.98)`, filter: 'blur(0px)', opacity: 1 },
+              { transform: `${baseT}scale(1)`, filter: 'blur(0px)', opacity: 1 },
+            ];
+      try {
+        el.animate(kf, {
+          duration: kind === 'down' ? 180 : 220,
+          easing: 'cubic-bezier(0.2, 0.9, 0.2, 1)',
+        });
+      } catch {
+        // ignore (older browsers)
+      }
+    }
+
+    function refreshCrownDisplays() {
+      for (const b of pinballs) {
+        const crown = isCrownBall(b);
+        const lvl = crown ? getCrownLevelForEmoji(b.emoji) : 0;
+        const face = b.faceEl;
+        const cr = b.crownEl;
+        const wasCrown = b._lastVisualCrown;
+        const wasLvl = b._lastVisualLvl;
+        if (crown && lvl > 0) {
+          /* 왕관·얼굴 크기 비율 튜닝. 위치는 index.html .emoji-pinball-crown 변수 */
+          // 왕관(1~5단계) 얼굴 크기: 일반 대비 15% 크게
+          const faceScale = 1.15;
+          const faceBasePx = 22 + lvl * 6;
+          const facePx = Math.min(52 * faceScale, Math.round(faceBasePx * faceScale));
+          face.style.fontSize = `${facePx}px`;
+          cr.hidden = false;
+          // 왕관 크기: 기존(0.48배) 대비 1.5배(=0.72배)로 성장
+          const crownPx = Math.min(45, Math.max(16, Math.round(facePx * 0.72)));
+          cr.style.fontSize = `${crownPx}px`;
+
+          if (wasLvl != null && wasLvl !== lvl) {
+            animateEvolution(face, lvl > wasLvl ? 'up' : 'down');
+            animateEvolution(cr, lvl > wasLvl ? 'up' : 'down');
+          } else if (wasCrown === false) {
+            // 새로 왕관이 됐을 때도 '진화' 느낌
+            animateEvolution(face, 'up');
+            animateEvolution(cr, 'up');
+          }
+        } else {
+          face.style.fontSize = '';
+          cr.hidden = true;
+          cr.style.fontSize = '';
+
+          // 왕관이 사라진 경우(레벨 0 또는 왕관 자리 변경)는 줄어드는 느낌
+          if (wasCrown && crown === false) {
+            animateEvolution(face, 'down');
+          }
+        }
+        b._lastVisualCrown = crown && lvl > 0;
+        b._lastVisualLvl = crown && lvl > 0 ? lvl : 0;
+        b.w = Math.max(b.el.offsetWidth, 16);
+        b.h = Math.max(b.el.offsetHeight, 16);
+      }
+    }
+
+    function removeNewestPinballForEmoji(emoji) {
+      const list = pinballs.filter((b) => b.emoji === emoji);
+      if (list.length === 0) return;
+      const victim = list.reduce((a, c) => (c.birthSeq > a.birthSeq ? c : a));
+      const idx = pinballs.indexOf(victim);
+      if (idx === -1) return;
+      pinballs.splice(idx, 1);
+      victim.el.remove();
+    }
+
+    function buildPinballTargetCounts() {
+      const target = {};
+      for (const [e, raw] of Object.entries(state.emojiCounts || {})) {
+        const votes = Math.floor(Number(raw) || 0);
+        if (votes <= 0) continue;
+        const sac = Math.floor(Number(state.sacrificedEmojiCounts[e]) || 0);
+        const live = Math.max(0, votes - sac);
+        if (live <= 0) continue;
+        target[e] = Math.min(live, PINBALL_MAX_PER_EMOJI);
+      }
+      return target;
+    }
+
+    function orderedEmojiKeysForSync(target) {
+      const set = new Set([...Object.keys(target), ...pinballs.map((b) => b.emoji)]);
+      const extra = [...set].filter((e) => !EMOJIS.includes(e)).sort();
+      return [...EMOJIS.filter((e) => set.has(e)), ...extra];
+    }
+
+    function syncEmojiPinballs() {
+      const W = pinballLayer.clientWidth;
+      const H = pinballLayer.clientHeight;
+      if (W < 24 || H < 24) {
+        if (pinballLayoutAttempts < 40) {
+          pinballLayoutAttempts += 1;
+          window.requestAnimationFrame(() => syncEmojiPinballs());
+        }
+        return;
+      }
+      pinballLayoutAttempts = 0;
+
+      const target = buildPinballTargetCounts();
+      const ordered = orderedEmojiKeysForSync(target);
+
+      let needsChange = false;
+      for (const emoji of ordered) {
+        const want = target[emoji] || 0;
+        if (countPinballsForEmoji(emoji) !== want) needsChange = true;
+      }
+      if (!needsChange) {
+        refreshCrownDisplays();
+        if (pinballs.length > 0) startPinballLoop();
+        else stopPinballLoop();
+        renderDebugPanel();
+        return;
+      }
+
+      for (const emoji of ordered) {
+        const want = target[emoji] || 0;
+        while (countPinballsForEmoji(emoji) > want) removeNewestPinballForEmoji(emoji);
+        while (countPinballsForEmoji(emoji) < want) {
+          pinballs.push(createPinballBall(emoji, W, H));
+        }
+      }
+
+      refreshCrownDisplays();
+      if (pinballs.length > 0) startPinballLoop();
+      else stopPinballLoop();
+      renderDebugPanel();
+    }
+
+    function separateSameEmojiPair(A, B, W, H) {
+      const cx = A.x + A.w / 2 - (B.x + B.w / 2);
+      const cy = A.y + A.h / 2 - (B.y + B.h / 2);
+      const d = Math.hypot(cx, cy) || 1;
+      const push = 4;
+      A.x += (cx / d) * push;
+      A.y += (cy / d) * push;
+      B.x -= (cx / d) * push;
+      B.y -= (cy / d) * push;
+      A.x = Math.max(0, Math.min(W - A.w, A.x));
+      A.y = Math.max(0, Math.min(H - A.h, A.y));
+      B.x = Math.max(0, Math.min(W - B.w, B.x));
+      B.y = Math.max(0, Math.min(H - B.h, B.y));
+      A.vx += (cx / d) * 1.2;
+      A.vy += (cy / d) * 1.2;
+      B.vx -= (cx / d) * 1.2;
+      B.vy -= (cy / d) * 1.2;
+    }
+
+    function scheduleMergePersist(emoji, delta) {
+      if (!delta) return;
+      mergePersistPending[emoji] = (mergePersistPending[emoji] || 0) + delta;
+      if (mergePersistTimer != null) window.clearTimeout(mergePersistTimer);
+      mergePersistTimer = window.setTimeout(() => {
+        mergePersistTimer = null;
+        flushMergePersistToFirestore();
+      }, 55);
+    }
+
+    function flushMergePersistToFirestore() {
+      const keys = Object.keys(mergePersistPending);
+      if (keys.length === 0) return;
+      const upd = { updatedAt: serverTimestamp() };
+      let has = false;
+      for (const em of keys) {
+        const d = mergePersistPending[em];
+        delete mergePersistPending[em];
+        if (!d) continue;
+        has = true;
+        upd[`emojiCrownMerge.${em}`] = increment(d);
+      }
+      if (!has) return;
+      updateDoc(restaurantDocRef, upd)
+        .catch((err) => {
+          console.warn('[pinball] emojiCrownMerge updateDoc 실패:', err);
+          return setDoc(
+            restaurantDocRef,
+            { date: dateStr, updatedAt: serverTimestamp() },
+            { merge: true },
+          ).then(() => updateDoc(restaurantDocRef, upd));
+        })
+        .catch((e) => console.error(e));
+    }
+
+    function persistCrownMergeReset(emoji) {
+      const next = { ...state.emojiCrownMerge };
+      delete next[emoji];
+      state.emojiCrownMerge = next;
+      updateDoc(restaurantDocRef, {
+        [`emojiCrownMerge.${emoji}`]: 0,
+        updatedAt: serverTimestamp(),
+      })
+        .catch((err) => console.error('[pinball] crown merge reset:', err));
+    }
+
+    function absorbSatelliteIntoCrown(satellite, crown, W, H) {
+      const em = crown.emoji;
+      const cur = Math.min(
+        CROWN_ABSORB_CAP,
+        Math.max(0, Math.floor(Number(state.emojiCrownMerge[em]) || 0)),
+      );
+      if (cur >= CROWN_ABSORB_CAP) return;
+      const si = pinballs.indexOf(satellite);
+      if (si === -1) return;
+      // 자연스러운 흡수 연출: 위성은 시뮬레이션에서 즉시 제거하고, 고스트를 왕관으로 빨아들이듯 애니메이션
+      const ghost = satellite.el.cloneNode(true);
+      ghost.classList.add('emoji-absorb-ghost');
+      ghost.style.pointerEvents = 'none';
+      ghost.style.opacity = '1';
+      ghost.style.filter = 'blur(0px)';
+      ghost.style.transition = 'none';
+      ghost.style.transform = `translate3d(${satellite.x}px,${satellite.y}px,0) scale(1)`;
+      pinballLayer.appendChild(ghost);
+
+      pinballs.splice(si, 1);
+      satellite.el.remove();
+
+      // 타겟은 왕관 중심으로
+      const gw = Math.max(ghost.offsetWidth, 16);
+      const gh = Math.max(ghost.offsetHeight, 16);
+      const tx = crown.x + crown.w / 2 - gw / 2;
+      const ty = crown.y + crown.h / 2 - gh / 2;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          ghost.style.transition =
+            'transform 0.24s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.24s ease-out, filter 0.24s ease-out';
+          ghost.style.opacity = '0';
+          ghost.style.filter = 'blur(2px)';
+          ghost.style.transform = `translate3d(${tx}px,${ty}px,0) scale(0.15) rotate(0.12turn)`;
+        });
+      });
+      window.setTimeout(() => {
+        if (ghost.parentNode) ghost.remove();
+      }, 280);
+
+      state.emojiCrownMerge = { ...state.emojiCrownMerge, [em]: cur + 1 };
+      scheduleMergePersist(em, 1);
+      applyOptimisticSacrificeOne(em);
+      scheduleSacrificePersist(em);
+      refreshCrownDisplays();
+      const dx = crown.x + crown.w / 2 - (W / 2);
+      const dy = crown.y + crown.h / 2 - (H / 2);
+      const d = Math.hypot(dx, dy) || 1;
+      crown.vx -= (dx / d) * 0.6;
+      crown.vy -= (dy / d) * 0.6;
+    }
+
+    function resolveSameEmojiInteractions(W, H) {
+      for (let i = 0; i < pinballs.length; i += 1) {
+        for (let j = i + 1; j < pinballs.length; j += 1) {
+          const A = pinballs[i];
+          const B = pinballs[j];
+          if (A.emoji !== B.emoji) continue;
+          if (!pinballsOverlap(A, B)) continue;
+          const merge = Math.min(
+            CROWN_ABSORB_CAP,
+            Math.max(0, Math.floor(Number(state.emojiCrownMerge[A.emoji]) || 0)),
+          );
+          const crownA = isCrownBall(A);
+          const crownB = isCrownBall(B);
+          if (merge < CROWN_ABSORB_CAP && crownA && !crownB) {
+            absorbSatelliteIntoCrown(B, A, W, H);
+            return;
+          }
+          if (merge < CROWN_ABSORB_CAP && crownB && !crownA) {
+            absorbSatelliteIntoCrown(A, B, W, H);
+            return;
+          }
+          separateSameEmojiPair(A, B, W, H);
+          return;
+        }
+      }
+    }
+
+    function pinballsOverlap(a, b) {
+      return (
+        a.x < b.x + b.w &&
+        a.x + a.w > b.x &&
+        a.y < b.y + b.h &&
+        a.y + a.h > b.y
+      );
+    }
+
+    function applyOptimisticSacrificeOne(emoji) {
+      const em = emoji;
+      const sp = Math.max(0, Math.floor(Number(state.sacrificedEmojiCounts[em]) || 0));
+      state.sacrificedEmojiCounts = { ...state.sacrificedEmojiCounts, [em]: sp + 1 };
+      renderTitleRight();
+      syncEmojiPinballs();
+    }
+
+    function flushSacrificePersistToFirestore() {
+      const keys = Object.keys(sacrificePersistPending);
+      if (keys.length === 0) return;
+      const upd = { updatedAt: serverTimestamp() };
+      let hasField = false;
+      for (const em of keys) {
+        const n = sacrificePersistPending[em];
+        delete sacrificePersistPending[em];
+        if (!n || n <= 0) continue;
+        hasField = true;
+        upd[`sacrificedEmojiCounts.${em}`] = increment(n);
+      }
+      if (!hasField) return;
+
+      updateDoc(restaurantDocRef, upd)
+        .catch((err) => {
+          console.warn('[pinball] sacrificedEmojiCounts updateDoc 실패, setDoc 후 재시도:', err);
+          return setDoc(
+            restaurantDocRef,
+            { date: dateStr, updatedAt: serverTimestamp() },
+            { merge: true },
+          ).then(() => updateDoc(restaurantDocRef, upd));
+        })
+        .catch((err) => console.error(err));
+    }
+
+    function scheduleSacrificePersist(emoji) {
+      sacrificePersistPending[emoji] = (sacrificePersistPending[emoji] || 0) + 1;
+      if (sacrificePersistTimer != null) window.clearTimeout(sacrificePersistTimer);
+      sacrificePersistTimer = window.setTimeout(() => {
+        sacrificePersistTimer = null;
+        flushSacrificePersistToFirestore();
+      }, 55);
+    }
+
+    function destroyLoserPinball(winner, loser, W, H) {
+      const loserIsCrown = isCrownBall(loser);
+      const li = pinballs.indexOf(loser);
+      if (li === -1) return;
+
+      pinballs.splice(li, 1);
+
+      if (loserIsCrown) {
+        persistCrownMergeReset(loser.emoji);
+      }
+
+      applyOptimisticSacrificeOne(loser.emoji);
+      scheduleSacrificePersist(loser.emoji);
+
+      if (isCrownBall(winner)) {
+        const wm = Math.floor(Number(state.emojiCrownMerge[winner.emoji]) || 0);
+        if (wm > 0) {
+          state.emojiCrownMerge = {
+            ...state.emojiCrownMerge,
+            [winner.emoji]: wm - 1,
+          };
+          scheduleMergePersist(winner.emoji, -1);
+        }
+      }
+
+      const lx = loser.x;
+      const ly = loser.y;
+      const el = loser.el;
+      el.style.pointerEvents = 'none';
+      el.style.transition =
+        'transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s ease-out';
+      el.style.opacity = '1';
+      el.style.filter = 'blur(0px)';
+      el.style.transform = `translate3d(${lx}px,${ly}px,0) scale(1)`;
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          el.style.opacity = '0';
+          el.style.filter = 'blur(2px)';
+          el.style.transform = `translate3d(${lx}px,${ly}px,0) scale(0.06) rotate(0.4turn)`;
+        });
+      });
+      window.setTimeout(() => {
+        if (el.parentNode) el.remove();
+      }, 260);
+
+      const dx = winner.x + winner.w / 2 - (loser.x + loser.w / 2);
+      const dy = winner.y + winner.h / 2 - (loser.y + loser.h / 2);
+      const d = Math.hypot(dx, dy) || 1;
+      const push = 5;
+      winner.x += (dx / d) * push;
+      winner.y += (dy / d) * push;
+      winner.vx += (dx / d) * 2.4;
+      winner.vy += (dy / d) * 2.4;
+      winner.x = Math.max(0, Math.min(W - winner.w, winner.x));
+      winner.y = Math.max(0, Math.min(H - winner.h, winner.y));
+
+      refreshCrownDisplays();
+    }
+
+    function resolvePinballCollisionCross(W, H) {
+      for (let i = 0; i < pinballs.length; i += 1) {
+        for (let j = i + 1; j < pinballs.length; j += 1) {
+          const A = pinballs[i];
+          const B = pinballs[j];
+          if (!pinballsOverlap(A, B)) continue;
+          if (A.emoji === B.emoji) continue;
+          const aIsCrown = isCrownBall(A) && getCrownLevelForEmoji(A.emoji) > 0;
+          const bIsCrown = isCrownBall(B) && getCrownLevelForEmoji(B.emoji) > 0;
+
+          // 왕관 vs 왕관(서로 다른 이모지): 둘 다 단계 -1
+          if (aIsCrown && bIsCrown) {
+            const aLvl = getCrownLevelForEmoji(A.emoji);
+            const bLvl = getCrownLevelForEmoji(B.emoji);
+            setCrownLevelForEmoji(A.emoji, aLvl - 1);
+            setCrownLevelForEmoji(B.emoji, bLvl - 1);
+
+            // 1단계 vs 1단계는 확률로 한쪽이 사라지게(결정전까지 계속 싸움)
+            if (aLvl === 1 && bLvl === 1 && Math.random() < 0.5) {
+              const loser = Math.random() < 0.5 ? A : B;
+              const winner = loser === A ? B : A;
+              destroyLoserPinball(winner, loser, W, H);
+              return;
+            }
+
+            separateSameEmojiPair(A, B, W, H);
+            refreshCrownDisplays();
+            return;
+          }
+
+          // 왕관 vs 일반: 왕관은 단계 -1, 일반은 희생(삭제)
+          if (aIsCrown !== bIsCrown) {
+            const crownBall = aIsCrown ? A : B;
+            const otherBall = aIsCrown ? B : A;
+            const lvl = getCrownLevelForEmoji(crownBall.emoji);
+            setCrownLevelForEmoji(crownBall.emoji, lvl - 1);
+            destroyLoserPinball(crownBall, otherBall, W, H);
+            return;
+          }
+
+          // 일반 vs 일반: 기존처럼 랜덤 1개 희생
+          const loser = Math.random() < 0.5 ? A : B;
+          const winner = loser === A ? B : A;
+          destroyLoserPinball(winner, loser, W, H);
+          return;
+        }
+      }
+    }
+
+    function stepPinballs() {
+      const W = pinballLayer.clientWidth;
+      const H = pinballLayer.clientHeight;
+      if (W < 8 || H < 8) return;
+
+      for (const b of pinballs) {
+        b.x += b.vx;
+        b.y += b.vy;
+
+        if (b.x <= 0) {
+          b.x = 0;
+          b.vx = Math.abs(b.vx) * (0.92 + Math.random() * 0.12);
+        } else if (b.x + b.w >= W) {
+          b.x = W - b.w;
+          b.vx = -Math.abs(b.vx) * (0.92 + Math.random() * 0.12);
+        }
+        if (b.y <= 0) {
+          b.y = 0;
+          b.vy = Math.abs(b.vy) * (0.92 + Math.random() * 0.12);
+        } else if (b.y + b.h >= H) {
+          b.y = H - b.h;
+          b.vy = -Math.abs(b.vy) * (0.92 + Math.random() * 0.12);
+        }
+
+        const mag = Math.hypot(b.vx, b.vy);
+        const minS = PINBALL_SPEED_MIN * 0.85;
+        if (mag < minS && mag > 0) {
+          b.vx = (b.vx / mag) * minS;
+          b.vy = (b.vy / mag) * minS;
+        }
+      }
+
+      resolveSameEmojiInteractions(W, H);
+      resolvePinballCollisionCross(W, H);
+
+      for (const b of pinballs) {
+        b.el.style.transform = `translate3d(${b.x}px,${b.y}px,0)`;
+      }
+    }
+
+    function pinballLoop() {
+      if (pinballs.length === 0) {
+        pinballRafId = null;
+        return;
+      }
+      if (!document.hidden) stepPinballs();
+      pinballRafId = window.requestAnimationFrame(pinballLoop);
+    }
+
+    function startPinballLoop() {
+      if (pinballRafId != null) return;
+      pinballRafId = window.requestAnimationFrame(pinballLoop);
+    }
+
+    /** 제목 오른쪽: 희생 누적(흡수 + 다른 이모지에게 패배). 누적 투표수(emojiCounts)는 표시하지 않음 */
     function renderTitleRight() {
       titleRight.innerHTML = '';
-      const entries = Object.entries(state.emojiCounts || {}).filter(([, c]) => (c || 0) > 0);
+      const entries = Object.entries(state.sacrificedEmojiCounts || {}).filter(
+        ([, c]) => (c || 0) > 0,
+      );
       if (entries.length === 0) return;
 
-      // 공용 표시: 카운트가 큰 순으로
       entries.sort((a, b) => (b[1] || 0) - (a[1] || 0));
 
       for (const [e, c] of entries) {
         const count = Number(c) || 0;
         if (count <= 0) continue;
-        if (count === 1) {
-          const s = document.createElement('span');
-          s.textContent = e;
-          titleRight.appendChild(s);
-        } else {
-          const pill = document.createElement('span');
-          pill.className = 'emoji-pill';
-          const emojiSpan = document.createElement('span');
-          emojiSpan.textContent = e;
-          const cnt = document.createElement('span');
-          cnt.className = 'count';
-          cnt.textContent = String(count);
-          pill.appendChild(emojiSpan);
-          pill.appendChild(cnt);
-          titleRight.appendChild(pill);
-        }
+        const pill = document.createElement('span');
+        pill.className = 'emoji-pill';
+        pill.title = '희생 누적(왕관 흡수·다른 이모지와 충돌 패배)';
+        const emojiSpan = document.createElement('span');
+        emojiSpan.textContent = e;
+        const cnt = document.createElement('span');
+        cnt.className = 'count';
+        cnt.textContent = String(count);
+        pill.appendChild(emojiSpan);
+        pill.appendChild(cnt);
+        titleRight.appendChild(pill);
       }
+    }
+
+    function getEmojiDebugStats(e) {
+      const votes = Math.floor(Number(state.emojiCounts?.[e]) || 0);
+      const sacrificed = Math.floor(Number(state.sacrificedEmojiCounts?.[e]) || 0);
+      const live = Math.max(0, votes - sacrificed);
+      const want = Math.min(live, PINBALL_MAX_PER_EMOJI);
+      const have = countPinballsForEmoji(e);
+      const crownLvl = getCrownLevelForEmoji(e);
+      return { votes, sacrificed, live, want, have, crownLvl };
+    }
+
+    function renderDebugPanel() {
+      if (!DEBUG_ENABLED || !debugEl) return;
+      const lines = [];
+      lines.push(`[debug] rid=${rid}  date=${dateStr}`);
+      lines.push(
+        `pinballs=${pinballs.length}  types=${new Set(pinballs.map((b) => b.emoji)).size}`,
+      );
+      lines.push('');
+      lines.push('emoji   votes  sac  live  want  have  crown');
+      for (const e of EMOJIS) {
+        const s = getEmojiDebugStats(e);
+        lines.push(
+          `${e}      ${String(s.votes).padStart(4)}  ${String(s.sacrificed).padStart(3)}  ${String(s.live).padStart(4)}  ${String(s.want).padStart(4)}  ${String(s.have).padStart(4)}  ${String(s.crownLvl).padStart(5)}`,
+        );
+      }
+      debugEl.hidden = false;
+      debugEl.textContent = lines.join('\n');
     }
 
     function renderEmojiButtons() {
@@ -310,6 +961,13 @@ function renderMenus(restaurants) {
         // 공용 투표라 active 표시는 하지 않음(로그인 없이 개인 상태 추적 불가)
         b.addEventListener('click', (ev) => {
           ev.stopPropagation();
+          // 클릭 즉시 로컬에 낙관적 반영(스냅샷/네트워크 딜레이 체감 감소)
+          const prev = Math.max(0, Math.floor(Number(state.emojiCounts[e]) || 0));
+          state.emojiCounts = { ...state.emojiCounts, [e]: prev + 1 };
+          syncEmojiPinballs();
+          renderDebugPanel();
+          if (DEBUG_ENABLED) console.debug('[debug][vote-click]', rid, e, getEmojiDebugStats(e));
+
           // 중복 투표: 클릭할 때마다 +1 (Firestore에 누적)
           // updateDoc은 문서가 없으면 실패하므로 setDoc으로 베이스를 먼저 만들어두고 updateDoc 수행
           setDoc(
@@ -329,44 +987,70 @@ function renderMenus(restaurants) {
       }
     }
 
+    function isSameTextFlying(text) {
+      for (const el of danmaku.querySelectorAll('span.danmaku-line')) {
+        if (el.textContent === text) return true;
+      }
+      return false;
+    }
+
     function spawnDanmaku(text) {
+      if (isSameTextFlying(text)) return;
+
       const span = document.createElement('span');
+      span.className = 'danmaku-line';
       span.textContent = text;
       span.style.color = randomColor();
       span.style.top = `${Math.floor(Math.random() * 70) + 8}%`;
-      const duration = Math.floor(Math.random() * 6) + 8; // 8~13s
-      span.style.animationDuration = `${duration}s`;
+      span.style.position = 'absolute';
+      span.style.left = '0';
+      span.style.animation = 'none';
+      span.style.willChange = 'transform';
+
       danmaku.appendChild(span);
-      setTimeout(() => {
+      const cw = danmaku.clientWidth;
+      const sw = Math.max(span.offsetWidth, 1);
+      const distancePx = cw + sw + 16;
+      const v =
+        DANMAKU_PX_PER_SEC_MIN +
+        Math.random() * (DANMAKU_PX_PER_SEC_MAX - DANMAKU_PX_PER_SEC_MIN);
+      const durationSec = distancePx / v;
+
+      span.style.transform = `translateX(${cw}px)`;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          span.style.transition = `transform ${durationSec}s linear`;
+          span.style.transform = `translateX(${-sw}px)`;
+        });
+      });
+
+      let cleaned = false;
+      const finish = () => {
+        if (cleaned) return;
+        cleaned = true;
+        span.removeEventListener('transitionend', onEnd);
         span.remove();
-      }, (duration + 1) * 1000);
+      };
+      const onEnd = (ev) => {
+        if (ev.propertyName !== 'transform') return;
+        finish();
+      };
+      span.addEventListener('transitionend', onEnd);
+      window.setTimeout(finish, durationSec * 1000 + 400);
     }
 
     function startDanmakuLoop() {
-      // 코멘트를 계속 흘려보냄. 한 코멘트당 10번까지만 반복(부하 제한).
-      const keyPrefix = `${dateStr}:${rid}:`;
-      if (!window.__BABB_DANMAKU_SEEN__) window.__BABB_DANMAKU_SEEN__ = {};
-      const seen = window.__BABB_DANMAKU_SEEN__;
-
+      // 같은 문구는 화면에 하나만(겹침 없음). 사라지면 이후 틱에서 다시 나올 수 있음(일일 반복 제한 없음).
       const tick = () => {
         if (!state.comments || state.comments.length === 0) return;
-        const candidates = state.comments.filter((c) => {
-          const k = `${keyPrefix}${c.id}`;
-          const used = seen[k] || 0;
-          return used < DANMAKU_REPEAT_LIMIT;
-        });
+        const candidates = state.comments.filter((c) => !isSameTextFlying(c.text));
         if (candidates.length === 0) return;
         const pick = candidates[Math.floor(Math.random() * candidates.length)];
-        const k = `${keyPrefix}${pick.id}`;
-        seen[k] = (seen[k] || 0) + 1;
         spawnDanmaku(pick.text);
       };
 
-      // 1.6~2.6초 사이 랜덤 인터벌 느낌으로 setInterval + 내부 랜덤 스킵
       setInterval(() => {
-        // 화면이 숨겨져 있으면 쉬기
         if (document.hidden) return;
-        // 70% 확률로 한 번 흘리기
         if (Math.random() < 0.7) tick();
       }, 1800);
     }
@@ -398,7 +1082,12 @@ function renderMenus(restaurants) {
         if (el !== actions) el.hidden = true;
       });
       actions.hidden = false;
-      commentInput.focus();
+      // 모바일에서 자동 포커스는 소프트키보드가 떠서 '클릭이 씹히는' 느낌이 자주 나서 기본은 포커스하지 않음.
+      // (원하면 입력창을 직접 터치해서 포커스)
+      // 데스크탑(정밀 포인터)일 때만 포커스
+      if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+        commentInput.focus();
+      }
     };
     wrap.addEventListener('click', (ev) => {
       // 열려있을 때 메뉴 영역 클릭으로는 닫히지 않게
@@ -420,6 +1109,7 @@ function renderMenus(restaurants) {
 
     renderEmojiButtons();
     renderTitleRight();
+    renderDebugPanel();
 
     // 공유 데이터 구독
     onSnapshot(
@@ -427,8 +1117,54 @@ function renderMenus(restaurants) {
       (snap) => {
         const d = snap.exists() ? snap.data() : {};
         const rowDate = typeof d.date === 'string' ? d.date : '';
-        state.emojiCounts = rowDate === dateStr ? d.emojiCounts || {} : {};
+        const savedCounts = { ...state.emojiCounts };
+        const savedSacrificed = { ...state.sacrificedEmojiCounts };
+
+        if (rowDate !== dateStr) {
+          state.emojiCounts = {};
+          state.sacrificedEmojiCounts = {};
+          state.emojiCrownMerge = {};
+        } else {
+          // emojiCounts는 증가만 하는 값이므로, 스냅샷이 늦게 도착해도 로컬(낙관)값이 꺾이지 않게 max로 병합
+          const incCounts = d.emojiCounts || {};
+          const mergedCounts = {};
+          const keys = new Set([...Object.keys(incCounts), ...Object.keys(savedCounts)]);
+          for (const k of keys) {
+            const a = Math.floor(Number(incCounts[k]) || 0);
+            const b = Math.floor(Number(savedCounts[k]) || 0);
+            const v = Math.max(a, b);
+            if (v > 0) mergedCounts[k] = v;
+          }
+          state.emojiCounts = mergedCounts;
+          const rawCm = d.emojiCrownMerge || {};
+          const nextCm = {};
+          for (const k of Object.keys(rawCm)) {
+            let v = Math.floor(Number(rawCm[k]) || 0);
+            v = Math.max(0, Math.min(CROWN_ABSORB_CAP, v));
+            if (v > 0) nextCm[k] = v;
+          }
+          state.emojiCrownMerge = nextCm;
+          const incSac = d.sacrificedEmojiCounts || {};
+          const legacyDes = d.destroyedEmojiCounts || {};
+          const mergedSac = {};
+          const sacKeys = new Set([
+            ...Object.keys(incSac),
+            ...Object.keys(legacyDes),
+            ...Object.keys(savedSacrificed),
+          ]);
+          for (const k of sacKeys) {
+            const a = Math.floor(Number(incSac[k]) || 0);
+            const b = Math.floor(Number(legacyDes[k]) || 0);
+            const c = Math.floor(Number(savedSacrificed[k]) || 0);
+            const v = Math.max(a, b, c);
+            if (v > 0) mergedSac[k] = v;
+          }
+          state.sacrificedEmojiCounts = mergedSac;
+        }
+
         renderTitleRight();
+        syncEmojiPinballs();
+        renderDebugPanel();
       },
       (err) => console.error(err),
     );
@@ -447,6 +1183,24 @@ function renderMenus(restaurants) {
     );
 
     startDanmakuLoop();
+
+    window.__BABB_PINBALL_CLEANUPS__.push(() => {
+      stopPinballLoop();
+      if (sacrificePersistTimer != null) {
+        window.clearTimeout(sacrificePersistTimer);
+        sacrificePersistTimer = null;
+      }
+      if (mergePersistTimer != null) {
+        window.clearTimeout(mergePersistTimer);
+        mergePersistTimer = null;
+      }
+      if (Object.keys(sacrificePersistPending).length > 0) {
+        flushSacrificePersistToFirestore();
+      }
+      if (Object.keys(mergePersistPending).length > 0) {
+        flushMergePersistToFirestore();
+      }
+    });
   }
 }
 
@@ -490,6 +1244,13 @@ function showData(data) {
   } else {
     updatedLine.hidden = true;
   }
+}
+
+function formatDebugKeyVals(obj) {
+  const keys = Object.keys(obj);
+  if (keys.length === 0) return '';
+  keys.sort();
+  return keys.map((k) => `${k}:${obj[k]}`).join('  ');
 }
 
 const menuRef = doc(db, 'menus', 'current');

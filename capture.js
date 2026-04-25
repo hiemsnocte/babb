@@ -85,6 +85,155 @@ async function waitForFrame(page, predicate, timeoutMs = 60000) {
   throw new Error('네이버 지도 프레임(entryIframe)을 찾지 못했습니다.');
 }
 
+/** 메뉴 모달 등에서 “가장 크게 보이는 img”만 골라 원본 바이트 저장(PC에서 이미지 복사와 유사) */
+const MIN_IMAGE_AREA_FOR_URL_DOWNLOAD = 120 * 120;
+
+const CHROME_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
+/** search.pstatic.net/common/?src=… 형태면 실제 원본(ldb-phinf 등)을 먼저 시도합니다. */
+function variantsForNaverImageUrl(url) {
+  try {
+    const u = new URL(url);
+    const inner = u.searchParams.get('src');
+    if (inner) {
+      const decoded = decodeURIComponent(inner);
+      if (/^https?:\/\//i.test(decoded) && decoded !== url) return [decoded, url];
+    }
+  } catch {
+    /* ignore */
+  }
+  return [url];
+}
+
+/**
+ * 브라우저 fetch는 CORS로 막히는 경우가 많아, Node에서 Referer를 붙여 받습니다.
+ */
+async function downloadImageBytesFromNode(url) {
+  const referers = [
+    'https://map.naver.com/',
+    'https://map.naver.com/p/',
+    'https://search.pstatic.net/',
+  ];
+  const variants = variantsForNaverImageUrl(url);
+
+  for (const imageUrl of variants) {
+    for (const referer of referers) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const res = await fetch(imageUrl, {
+          redirect: 'follow',
+          headers: {
+            Referer: referer,
+            'User-Agent': CHROME_UA,
+            Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+          },
+        });
+        if (!res.ok) continue;
+        // eslint-disable-next-line no-await-in-loop
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length >= 500) return buf;
+      } catch {
+        /* 다음 Referer / URL */
+      }
+    }
+  }
+  return null;
+}
+
+async function tryFetchLargestVisibleImageAcrossFrames(page, outPath) {
+  const candidates = [];
+  for (const f of page.frames()) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const pick = await f.evaluate(() => {
+        function isVisible(el) {
+          if (!(el instanceof Element)) return false;
+          const style = window.getComputedStyle(el);
+          if (
+            style.display === 'none' ||
+            style.visibility === 'hidden' ||
+            style.opacity === '0'
+          )
+            return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 10 && r.height > 10;
+        }
+
+        let best = null;
+        let bestArea = 0;
+        for (const img of document.querySelectorAll('img')) {
+          if (!(img instanceof HTMLImageElement)) continue;
+          if (!isVisible(img)) continue;
+          const url = (img.currentSrc || img.getAttribute('src') || '').trim();
+          if (!url || url.startsWith('data:')) continue;
+          if (!/^https?:\/\//i.test(url) && !url.startsWith('blob:')) continue;
+          const r = img.getBoundingClientRect();
+          const area = r.width * r.height;
+          if (area > bestArea) {
+            bestArea = area;
+            best = { url, area: Math.round(area) };
+          }
+        }
+        return best;
+      });
+      if (pick && pick.url) candidates.push({ frame: f, url: pick.url, area: pick.area });
+    } catch {
+      /* ignore */
+    }
+  }
+
+  if (candidates.length === 0) {
+    console.log('[봄봄] 이미지 URL 다운로드: 후보 img 없음');
+    return false;
+  }
+
+  candidates.sort((a, b) => b.area - a.area);
+  const best = candidates[0];
+  if (best.area < MIN_IMAGE_AREA_FOR_URL_DOWNLOAD) {
+    console.log(
+      `[봄봄] 이미지 URL 다운로드: 최대 면적이 작아 스킵 (area=${best.area} < ${MIN_IMAGE_AREA_FOR_URL_DOWNLOAD})`,
+    );
+    return false;
+  }
+
+  const { url: imageUrl, frame } = best;
+
+  try {
+    let bytes = null;
+
+    if (imageUrl.startsWith('blob:')) {
+      try {
+        const byteList = await frame.evaluate(async (u) => {
+          const res = await fetch(u);
+          if (!res.ok) throw new Error(`http ${res.status}`);
+          const ab = await res.arrayBuffer();
+          return Array.from(new Uint8Array(ab));
+        }, imageUrl);
+        if (byteList && byteList.length >= 500) bytes = Buffer.from(byteList);
+      } catch (e) {
+        console.warn('[봄봄] blob URL fetch(프레임 내) 실패:', String(e?.message || e));
+      }
+    } else {
+      bytes = await downloadImageBytesFromNode(imageUrl);
+    }
+
+    if (!bytes) {
+      console.warn('[봄봄] 이미지 바이트 수신 실패 → fullPage 스크린샷 폴백');
+      return false;
+    }
+
+    await fs.writeFile(outPath, bytes);
+    const preview =
+      imageUrl.length > 120 ? `${imageUrl.slice(0, 120)}…` : imageUrl;
+    console.log(`[봄봄] 메인 이미지 저장 OK (Node fetch, area=${best.area}, ${preview})`);
+    return true;
+  } catch (e) {
+    console.warn('[봄봄] 이미지 저장 중 오류 → fullPage 스크린샷 폴백:', String(e?.message || e));
+    return false;
+  }
+}
+
 async function captureNaverMapNews(page, url, imageFileName) {
   await page.goto(url, { waitUntil: 'load' });
 
@@ -137,21 +286,32 @@ async function captureNaverMapNews(page, url, imageFileName) {
 
   /**
    * 네이버가 클래스를 자주 바꿔서, 고정 클래스보다
-   * 1) .place_thumb 안 img(썸네일 — ::after는 DOM에 없어 부모/이미지로 클릭)
+   * 1) .place_thumb 안 img(썸네일 — ::after는 DOM에 없어 부모/이미지로 클릭; 규격은 240×300·339×226 등 허용)
    * 2) 텍스트 "메뉴" (소식 피드 쪽; 상단과 겹치면 잘못 누를 수 있어 2순위)
    * 3) 예전 구조(Hqj1R/zmCWt) 폴백
    * 순으로 시도합니다.
    */
   async function tryClickMenuPhotoButton(fr) {
     // 1) .place_thumb — ::after는 선택 불가.
-    //    소식 피드에 이미지가 많아도, "규격(339x226)"에 가까운 썸네일을 먼저 집습니다.
+    //    소식 피드에 이미지가 많아도, 알려진 메뉴 썸네일 규격에 가까운 img를 먼저 집습니다.
     const thumbResult = await fr.evaluate(() => {
-      const TARGET_W = 339;
-      const TARGET_H = 226;
+      // 네이버/업체 UI 변경 시 규격이 바뀔 수 있어 복수 허용 (자연/표시 크기 모두 검사)
+      const MENU_THUMB_TARGETS = [
+        { w: 240, h: 300 },
+        { w: 339, h: 226 },
+      ];
       const TOL = 3; // px 오차 허용
 
       function approx(n, t) {
         return Math.abs(n - t) <= TOL;
+      }
+
+      function sizeMatchesMenuThumb(nw, nh, rw, rh) {
+        return MENU_THUMB_TARGETS.some(
+          ({ w, h }) =>
+            (nw && nh && approx(nw, w) && approx(nh, h)) ||
+            (approx(rw, w) && approx(rh, h)),
+        );
       }
 
       function isVisible(el) {
@@ -183,9 +343,7 @@ async function captureNaverMapNews(page, url, imageFileName) {
           const rw = Math.round(rect.width);
           const rh = Math.round(rect.height);
 
-          const sizeOk =
-            (nw && nh && approx(nw, TARGET_W) && approx(nh, TARGET_H)) ||
-            (approx(rw, TARGET_W) && approx(rh, TARGET_H));
+          const sizeOk = sizeMatchesMenuThumb(nw, nh, rw, rh);
           if (!sizeOk) continue;
 
           const clickable =
@@ -216,9 +374,7 @@ async function captureNaverMapNews(page, url, imageFileName) {
         const rect = img.getBoundingClientRect();
         const rw = Math.round(rect.width);
         const rh = Math.round(rect.height);
-        const sizeOk =
-          (nw && nh && approx(nw, TARGET_W) && approx(nh, TARGET_H)) ||
-          (approx(rw, TARGET_W) && approx(rh, TARGET_H));
+        const sizeOk = sizeMatchesMenuThumb(nw, nh, rw, rh);
         if (!sizeOk) continue;
 
         const clickable =
@@ -578,9 +734,12 @@ async function captureNaverMapNews(page, url, imageFileName) {
 
   // 클릭 후 화면이 바뀔 시간을 확보 (요청사항: 10초)
   await new Promise((r) => setTimeout(r, 10000));
-  // 봄봄(네이버)은 요소 크롭 시 잘못된 영역이 잡히는 경우가 있어
-  // 기존처럼 페이지 전체를 캡처합니다.
-  await page.screenshot({ path: imageFileName, fullPage: true });
+  // 우선: 뷰어에서 가장 큰 img의 URL을 fetch해 저장(배경 없이 메뉴 원본에 가깝게).
+  // 실패 시: 전체 페이지 캡처(배경 포함).
+  const savedFromImageUrl = await tryFetchLargestVisibleImageAcrossFrames(page, imageFileName);
+  if (!savedFromImageUrl) {
+    await page.screenshot({ path: imageFileName, fullPage: true });
+  }
 }
 
 async function screenshotLargestVisibleImage(ctx, outPath) {
