@@ -87,6 +87,7 @@ async function resetRestaurantDailyState(db, rid, dateStr) {
       {
         date: dateStr,
         emojiCounts: {},
+        liveEmojiCounts: {},
         sacrificedEmojiCounts: {},
         destroyedEmojiCounts: {},
         emojiCrownMerge: {},

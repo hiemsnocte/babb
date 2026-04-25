@@ -44,6 +44,131 @@ const menusEl = document.getElementById('menus');
 const debugEl = document.getElementById('debug');
 const DEBUG_ENABLED = new URLSearchParams(window.location.search).has('debug');
 
+let lastRenderedRestaurants = [];
+
+function ensureImageModal() {
+  let root = document.getElementById('image-modal');
+  if (root) {
+    const img = root.querySelector('img');
+    const closeBtn = root.querySelector('button');
+    return { root, img, closeBtn };
+  }
+
+  root = document.createElement('div');
+  root.id = 'image-modal';
+  root.className = 'image-modal';
+
+  const panel = document.createElement('div');
+  panel.className = 'image-modal-panel';
+  const img = document.createElement('img');
+  img.alt = '메뉴 이미지 크게 보기';
+  img.decoding = 'async';
+  img.loading = 'lazy';
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'image-modal-close';
+  closeBtn.textContent = '✕';
+  closeBtn.setAttribute('aria-label', '닫기');
+
+  panel.appendChild(img);
+  panel.appendChild(closeBtn);
+  root.appendChild(panel);
+  document.body.appendChild(root);
+
+  const close = () => {
+    root.classList.remove('on');
+    img.removeAttribute('src');
+  };
+  closeBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    close();
+  });
+  root.addEventListener('click', () => close());
+  panel.addEventListener('click', (ev) => ev.stopPropagation());
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') close();
+  });
+
+  return { root, img, closeBtn };
+}
+
+function openImageModal(src, altText) {
+  const m = ensureImageModal();
+  m.img.alt = altText || '메뉴 이미지 크게 보기';
+  m.img.src = src;
+  m.root.classList.add('on');
+}
+
+function ensureCompareModal() {
+  let root = document.getElementById('compare-modal');
+  if (root) {
+    const grid = root.querySelector('.compare-grid');
+    const closeBtn = root.querySelector('button.image-modal-close');
+    return { root, grid, closeBtn };
+  }
+
+  root = document.createElement('div');
+  root.id = 'compare-modal';
+  root.className = 'image-modal';
+
+  const panel = document.createElement('div');
+  panel.className = 'image-modal-panel compare-modal-panel';
+
+  const grid = document.createElement('div');
+  grid.className = 'compare-grid';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'image-modal-close';
+  closeBtn.textContent = '✕';
+  closeBtn.setAttribute('aria-label', '닫기');
+
+  panel.appendChild(grid);
+  panel.appendChild(closeBtn);
+  root.appendChild(panel);
+  document.body.appendChild(root);
+
+  const close = () => root.classList.remove('on');
+  closeBtn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    close();
+  });
+  root.addEventListener('click', () => close());
+  panel.addEventListener('click', (ev) => ev.stopPropagation());
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') close();
+  });
+
+  return { root, grid, closeBtn };
+}
+
+function openCompareModal(restaurants) {
+  const m = ensureCompareModal();
+  m.grid.innerHTML = '';
+  const list = Array.isArray(restaurants) ? restaurants : [];
+  const order = ['beoksan', 'theeats', 'bombom'];
+  const byId = new Map(list.map((r) => [r.id, r]));
+  const sorted = order.map((id) => byId.get(id)).filter(Boolean);
+  const finalList = sorted.length > 0 ? sorted : list;
+
+  for (const r of finalList) {
+    const item = document.createElement('div');
+    item.className = 'compare-item';
+    const cap = document.createElement('div');
+    cap.className = 'cap';
+    cap.textContent = r.name || r.id || '메뉴';
+    const img = document.createElement('img');
+    img.alt = `${cap.textContent} 메뉴`;
+    img.decoding = 'async';
+    img.loading = 'lazy';
+    img.src = r.imageUrl;
+    item.appendChild(cap);
+    item.appendChild(img);
+    m.grid.appendChild(item);
+  }
+  m.root.classList.add('on');
+}
+
 const EMOJIS = ['😍', '😋', '🤔', '😑', '😒', '😡', '🤬'];
 /** 단마쿠 가로 이동 속도(px/s). 짧은 글·긴 글 모두 같은 속도로 우→좌 전체 횡단 */
 const DANMAKU_PX_PER_SEC_MIN = 48;
@@ -214,14 +339,32 @@ function renderMenus(restaurants) {
     const card = document.createElement('section');
     card.className = 'menu-card';
 
-    const title = document.createElement('h2');
+    const title = document.createElement('div');
     title.className = 'menu-title';
-    const titleLeft = document.createElement('span');
-    titleLeft.textContent = r.name || r.id || '메뉴';
+
+    const titleTop = document.createElement('div');
+    titleTop.className = 'menu-title-top';
+    const titleName = document.createElement('span');
+    titleName.className = 'menu-title-name';
+    titleName.textContent = r.name || r.id || '메뉴';
+    titleTop.appendChild(titleName);
+
+    const titleMid = document.createElement('div');
+    titleMid.className = 'menu-title-mid';
+    const titleGrave = document.createElement('span');
+    titleGrave.className = 'grave-icon';
+    titleGrave.textContent = '🪦';
+    titleMid.appendChild(titleGrave);
+
+    const titleBottom = document.createElement('div');
+    titleBottom.className = 'menu-title-bottom';
     const titleRight = document.createElement('span');
     titleRight.className = 'title-right';
-    title.appendChild(titleLeft);
-    title.appendChild(titleRight);
+    titleBottom.appendChild(titleRight);
+
+    title.appendChild(titleTop);
+    title.appendChild(titleMid);
+    title.appendChild(titleBottom);
 
     const wrap = document.createElement('div');
     wrap.className = 'img-wrap';
@@ -234,7 +377,7 @@ function renderMenus(restaurants) {
     danmaku.className = 'danmaku';
 
     const img = document.createElement('img');
-    img.alt = `${title.textContent} 메뉴`;
+    img.alt = `${titleName.textContent} 메뉴`;
     img.loading = 'lazy';
     img.decoding = 'async';
     img.src = r.imageUrl;
@@ -242,6 +385,21 @@ function renderMenus(restaurants) {
     const actions = document.createElement('div');
     actions.className = 'menu-actions';
     actions.hidden = true;
+
+    const viewOnlyBtn = document.createElement('button');
+    viewOnlyBtn.type = 'button';
+    viewOnlyBtn.className = 'menu-viewonly-btn';
+    viewOnlyBtn.textContent = '메뉴만 보기';
+    viewOnlyBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openImageModal(img.src, img.alt);
+    });
+    actions.appendChild(viewOnlyBtn);
+
+    const catchupBadge = document.createElement('div');
+    catchupBadge.className = 'catchup-badge';
+    catchupBadge.textContent = '동기화중입니다.. 제발 정상적으로 투표를 진행해주세요..';
+    wrap.appendChild(catchupBadge);
 
     const emojiRow = document.createElement('div');
     emojiRow.className = 'emoji-row';
@@ -275,6 +433,7 @@ function renderMenus(restaurants) {
     const rid = r.id || titleLeft.textContent;
     let state = {
       emojiCounts: {},
+      liveEmojiCounts: {},
       sacrificedEmojiCounts: {},
       emojiCrownMerge: {},
       comments: [],
@@ -294,6 +453,59 @@ function renderMenus(restaurants) {
     const sacrificePersistPending = {};
     let mergePersistTimer = null;
     const mergePersistPending = {};
+
+    // liveEmojiCounts(출격 가능 수) 증감 pending(낙관 반영용)
+    const pendingLiveDelta = {};
+    const lastServerLive = {};
+    let livePersistTimer = null;
+    const livePersistPending = {};
+
+    function applyOptimisticLiveDelta(emoji, delta) {
+      if (!delta) return;
+      const em = emoji;
+      pendingLiveDelta[em] = (pendingLiveDelta[em] || 0) + delta;
+      const prev = Math.max(0, Math.floor(Number(state.liveEmojiCounts[em]) || 0));
+      const next = Math.max(0, prev + delta);
+      const m = { ...state.liveEmojiCounts };
+      if (next <= 0) delete m[em];
+      else m[em] = next;
+      state.liveEmojiCounts = m;
+    }
+
+    function flushLivePersistToFirestore() {
+      const keys = Object.keys(livePersistPending);
+      if (keys.length === 0) return;
+      const upd = { updatedAt: serverTimestamp() };
+      let hasField = false;
+      for (const em of keys) {
+        const n = livePersistPending[em];
+        delete livePersistPending[em];
+        if (!n) continue;
+        hasField = true;
+        upd[`liveEmojiCounts.${em}`] = increment(n);
+      }
+      if (!hasField) return;
+      updateDoc(restaurantDocRef, upd)
+        .catch((err) => {
+          console.warn('[pinball] liveEmojiCounts updateDoc 실패, setDoc 후 재시도:', err);
+          return setDoc(
+            restaurantDocRef,
+            { date: dateStr, updatedAt: serverTimestamp() },
+            { merge: true },
+          ).then(() => updateDoc(restaurantDocRef, upd));
+        })
+        .catch((err) => console.error(err));
+    }
+
+    function scheduleLivePersist(emoji, delta) {
+      if (!delta) return;
+      livePersistPending[emoji] = (livePersistPending[emoji] || 0) + delta;
+      if (livePersistTimer != null) window.clearTimeout(livePersistTimer);
+      livePersistTimer = window.setTimeout(() => {
+        livePersistTimer = null;
+        flushLivePersistToFirestore();
+      }, 55);
+    }
 
     function stopPinballLoop() {
       if (pinballRafId != null) {
@@ -476,17 +688,44 @@ function renderMenus(restaurants) {
       victim.el.remove();
     }
 
+    // liveEmojiCounts: "출격 가능(현재 남아있는)" 수. 공(핀볼) 개수는 이것으로만 맞춘다.
+    // emojiCounts: 누적 투표(기록용). 희생(sacrificed)은 별도 표시용.
     function buildPinballTargetCounts() {
       const target = {};
-      for (const [e, raw] of Object.entries(state.emojiCounts || {})) {
-        const votes = Math.floor(Number(raw) || 0);
-        if (votes <= 0) continue;
-        const sac = Math.floor(Number(state.sacrificedEmojiCounts[e]) || 0);
-        const live = Math.max(0, votes - sac);
+      for (const [e, raw] of Object.entries(state.liveEmojiCounts || {})) {
+        const live = Math.floor(Number(raw) || 0);
         if (live <= 0) continue;
         target[e] = Math.min(live, PINBALL_MAX_PER_EMOJI);
       }
       return target;
+    }
+
+    let catchupUntil = 0;
+    let catchupLevel = 0; // 0: off, 1: normal, 2: x3, 3: please...
+    let lastSnapUpdatedMs = 0;
+    function inCatchup() {
+      return Date.now() < catchupUntil;
+    }
+    function beginCatchup(ms = 1200, level = 1) {
+      catchupUntil = Math.max(catchupUntil, Date.now() + ms);
+      catchupLevel = Math.max(catchupLevel, level);
+    }
+    function updateCatchupBadge() {
+      if (!catchupBadge) return;
+      const on = inCatchup();
+      catchupBadge.classList.toggle('on', on);
+      if (!on) {
+        catchupLevel = 0;
+        return;
+      }
+      if (catchupLevel >= 3) {
+        catchupBadge.textContent =
+          '동기화중입니다.. 제발 정상적으로 투표를 진행해주세요..';
+      } else if (catchupLevel === 2) {
+        catchupBadge.textContent = '동기화 가속 중.. x3';
+      } else {
+        catchupBadge.textContent = '동기화 중...';
+      }
     }
 
     function orderedEmojiKeysForSync(target) {
@@ -511,10 +750,27 @@ function renderMenus(restaurants) {
       const ordered = orderedEmojiKeysForSync(target);
 
       let needsChange = false;
+      let totalGap = 0;
       for (const emoji of ordered) {
         const want = target[emoji] || 0;
-        if (countPinballsForEmoji(emoji) !== want) needsChange = true;
+        const have = countPinballsForEmoji(emoji);
+        const gap = want - have;
+        totalGap += Math.abs(gap);
+        if (gap !== 0) needsChange = true;
       }
+      // 격차가 크면 잠깐 빨리감기(뒤쳐진 사람 빠르게 따라잡기)
+      // - 2~3: 약한 동기화
+      // - 4~8: 가속(x3)
+      // - 9+: 매우 많이 밀림(강한 문구)
+      if (totalGap >= 9) beginCatchup(1700, 3);
+      else if (totalGap >= 4) beginCatchup(1400, 2);
+      else if (totalGap >= 2) beginCatchup(900, 1);
+      // 거의 따라잡았으면 배지/캐치업을 빨리 끈다(계속 뜨는 현상 완화)
+      if (totalGap <= 1) {
+        catchupUntil = 0;
+        catchupLevel = 0;
+      }
+      updateCatchupBadge();
       if (!needsChange) {
         refreshCrownDisplays();
         if (pinballs.length > 0) startPinballLoop();
@@ -523,11 +779,28 @@ function renderMenus(restaurants) {
         return;
       }
 
+      const fast = inCatchup();
+      const perEmojiStep = fast ? 3 : 1;
+      let ops = 0;
+      const opsBudget = fast ? 40 : 12;
       for (const emoji of ordered) {
         const want = target[emoji] || 0;
-        while (countPinballsForEmoji(emoji) > want) removeNewestPinballForEmoji(emoji);
-        while (countPinballsForEmoji(emoji) < want) {
-          pinballs.push(createPinballBall(emoji, W, H));
+        let have = countPinballsForEmoji(emoji);
+        let guard = 0;
+        while (have > want && ops < opsBudget && guard < 20) {
+          const step = Math.min(perEmojiStep, have - want);
+          for (let t = 0; t < step; t += 1) removeNewestPinballForEmoji(emoji);
+          ops += step;
+          have -= step;
+          guard += 1;
+        }
+        guard = 0;
+        while (have < want && ops < opsBudget && guard < 20) {
+          const step = Math.min(perEmojiStep, want - have);
+          for (let t = 0; t < step; t += 1) pinballs.push(createPinballBall(emoji, W, H));
+          ops += step;
+          have += step;
+          guard += 1;
         }
       }
 
@@ -535,6 +808,11 @@ function renderMenus(restaurants) {
       if (pinballs.length > 0) startPinballLoop();
       else stopPinballLoop();
       renderDebugPanel();
+
+      // 아직 목표와 다르면 다음 프레임에서 이어서 맞춤(평소엔 부드럽게, 캐치업은 빠르게)
+      if (ops >= opsBudget) {
+        window.requestAnimationFrame(() => syncEmojiPinballs());
+      }
     }
 
     function separateSameEmojiPair(A, B, W, H) {
@@ -644,6 +922,9 @@ function renderMenus(restaurants) {
 
       state.emojiCrownMerge = { ...state.emojiCrownMerge, [em]: cur + 1 };
       scheduleMergePersist(em, 1);
+      // 위성 1개가 흡수되며 필드에서 사라짐 = live -1, 희생 +1
+      applyOptimisticLiveDelta(em, -1);
+      scheduleLivePersist(em, -1);
       applyOptimisticSacrificeOne(em);
       scheduleSacrificePersist(em);
       refreshCrownDisplays();
@@ -744,6 +1025,9 @@ function renderMenus(restaurants) {
         persistCrownMergeReset(loser.emoji);
       }
 
+      // 패배로 소멸: live -1, 희생 +1
+      applyOptimisticLiveDelta(loser.emoji, -1);
+      scheduleLivePersist(loser.emoji, -1);
       applyOptimisticSacrificeOne(loser.emoji);
       scheduleSacrificePersist(loser.emoji);
 
@@ -925,8 +1209,8 @@ function renderMenus(restaurants) {
     function getEmojiDebugStats(e) {
       const votes = Math.floor(Number(state.emojiCounts?.[e]) || 0);
       const sacrificed = Math.floor(Number(state.sacrificedEmojiCounts?.[e]) || 0);
-      const live = Math.max(0, votes - sacrificed);
-      const want = Math.min(live, PINBALL_MAX_PER_EMOJI);
+      const live = Math.floor(Number(state.liveEmojiCounts?.[e]) || 0);
+      const want = Math.min(Math.max(0, live), PINBALL_MAX_PER_EMOJI);
       const have = countPinballsForEmoji(e);
       const crownLvl = getCrownLevelForEmoji(e);
       return { votes, sacrificed, live, want, have, crownLvl };
@@ -964,6 +1248,7 @@ function renderMenus(restaurants) {
           // 클릭 즉시 로컬에 낙관적 반영(스냅샷/네트워크 딜레이 체감 감소)
           const prev = Math.max(0, Math.floor(Number(state.emojiCounts[e]) || 0));
           state.emojiCounts = { ...state.emojiCounts, [e]: prev + 1 };
+          applyOptimisticLiveDelta(e, 1);
           syncEmojiPinballs();
           renderDebugPanel();
           if (DEBUG_ENABLED) console.debug('[debug][vote-click]', rid, e, getEmojiDebugStats(e));
@@ -978,6 +1263,7 @@ function renderMenus(restaurants) {
             .then(() =>
               updateDoc(restaurantDocRef, {
                 [`emojiCounts.${e}`]: increment(1),
+                [`liveEmojiCounts.${e}`]: increment(1),
                 updatedAt: serverTimestamp(),
               }),
             )
@@ -1118,10 +1404,19 @@ function renderMenus(restaurants) {
         const d = snap.exists() ? snap.data() : {};
         const rowDate = typeof d.date === 'string' ? d.date : '';
         const savedCounts = { ...state.emojiCounts };
+        const savedLive = { ...state.liveEmojiCounts };
         const savedSacrificed = { ...state.sacrificedEmojiCounts };
+        const updatedMs =
+          d && d.updatedAt && typeof d.updatedAt.toMillis === 'function' ? d.updatedAt.toMillis() : 0;
+        if (updatedMs && lastSnapUpdatedMs && updatedMs - lastSnapUpdatedMs > 2500) {
+          // 탭이 멈췄다가(백그라운드/네트워크) 한 번에 따라온 경우
+          beginCatchup(1600, 2);
+        }
+        if (updatedMs) lastSnapUpdatedMs = updatedMs;
 
         if (rowDate !== dateStr) {
           state.emojiCounts = {};
+          state.liveEmojiCounts = {};
           state.sacrificedEmojiCounts = {};
           state.emojiCrownMerge = {};
         } else {
@@ -1136,6 +1431,30 @@ function renderMenus(restaurants) {
             if (v > 0) mergedCounts[k] = v;
           }
           state.emojiCounts = mergedCounts;
+
+          // liveEmojiCounts는 증감이 있으므로 서버 스냅샷을 기본으로 두고 pending delta로만 보정
+          const incLive = d.liveEmojiCounts || {};
+          const mergedLive = {};
+          const liveKeys = new Set([...Object.keys(incLive), ...Object.keys(savedLive)]);
+          for (const k of liveKeys) {
+            const serverNow = Math.floor(Number(incLive[k]) || 0);
+            const prevServer = Math.floor(Number(lastServerLive[k]) || 0);
+            const delta = serverNow - prevServer;
+            if (delta !== 0) {
+              const p = pendingLiveDelta[k] || 0;
+              if (p !== 0 && Math.sign(p) === Math.sign(delta)) {
+                const consume = Math.min(Math.abs(p), Math.abs(delta)) * Math.sign(p);
+                pendingLiveDelta[k] = p - consume;
+              }
+              lastServerLive[k] = serverNow;
+            } else if (lastServerLive[k] === undefined) {
+              lastServerLive[k] = serverNow;
+            }
+            const effective = Math.max(0, serverNow + (pendingLiveDelta[k] || 0));
+            if (effective > 0) mergedLive[k] = effective;
+          }
+          state.liveEmojiCounts = mergedLive;
+
           const rawCm = d.emojiCrownMerge || {};
           const nextCm = {};
           for (const k of Object.keys(rawCm)) {
@@ -1190,12 +1509,19 @@ function renderMenus(restaurants) {
         window.clearTimeout(sacrificePersistTimer);
         sacrificePersistTimer = null;
       }
+      if (livePersistTimer != null) {
+        window.clearTimeout(livePersistTimer);
+        livePersistTimer = null;
+      }
       if (mergePersistTimer != null) {
         window.clearTimeout(mergePersistTimer);
         mergePersistTimer = null;
       }
       if (Object.keys(sacrificePersistPending).length > 0) {
         flushSacrificePersistToFirestore();
+      }
+      if (Object.keys(livePersistPending).length > 0) {
+        flushLivePersistToFirestore();
       }
       if (Object.keys(mergePersistPending).length > 0) {
         flushMergePersistToFirestore();
@@ -1227,6 +1553,7 @@ function showData(data) {
 
   renderMenus(toRender);
   showDebug(data, toRender);
+  lastRenderedRestaurants = toRender;
 
   // 카드 렌더링에서 쓸 날짜(리셋/저장 키용)
   window.__BABB_DATE__ = dateStr || '';
@@ -1272,3 +1599,12 @@ onSnapshot(
     );
   },
 );
+
+// 헤더: 메뉴 비교(3장 모달)
+const compareBtn = document.getElementById('compare-btn');
+if (compareBtn) {
+  compareBtn.addEventListener('click', () => {
+    if (!lastRenderedRestaurants || lastRenderedRestaurants.length === 0) return;
+    openCompareModal(lastRenderedRestaurants);
+  });
+}
