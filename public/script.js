@@ -726,6 +726,43 @@ const CROWN_ABSORB_CAP = 5;
 /** rAF 한 프레임당 대략 이동량(px). 값이 클수록 빠름 */
 const PINBALL_SPEED_MIN = 1.1;
 const PINBALL_SPEED_MAX = 2.4;
+/** 이모지 클릭 콤보 리셋 간격(ms) */
+const VOTE_COMBO_RESET_MS = 1300;
+/** 최종 연출 단계: 무지개 + ? 전용 */
+const VOTE_COMBO_RAINBOW_STAGE = 100;
+/**
+ * 투표 이펙트 위치/강도 튜닝
+ * 아래 숫자만 바꾸면 위치를 손쉽게 미세 조정할 수 있습니다.
+ */
+const VOTE_FX_TUNE = {
+  // 분수(+1) 시작점 오프셋 (마우스 좌표 기준)
+  originOffsetX: -5,
+  originOffsetY: -20,
+  // 콤보 스탬프 기본 위치(분수 기준 오른쪽 위)
+  comboOffsetX: 20,
+  comboOffsetY: -20,
+  // 콤보 스탬프의 차곡차곡 쌓이는 간격
+  comboLaneGapY: 14,
+  // 콤보 위치 랜덤 흔들림(너무 크면 가독성 저하)
+  comboJitterX: 10,
+  comboJitterY: 6,
+  // 150+ WARNING 순찰 효과 위치/이동 튜닝
+  // - anchorMix: +1 시작점(0) ~ 콤보 시작점(1) 사이 보간
+  warningAnchorMixX: 0.5,
+  warningAnchorMixY: 0.5,
+  // 보간 후 추가 오프셋
+  warningOffsetX: 0,
+  warningOffsetY: 0,
+  // 오른쪽 -> 왼쪽 이동 거리
+  warningTravelX: 180,
+  // 워닝 이동 범위 스케일(0.5 = 기존의 50%)
+  warningTravelScale: 0.5,
+  // WARNING 연출 속도/주기
+  warningCooldownMs: 900,
+  warningDurationMs: 1900,
+  // 레이어 끝에서 잘리지 않도록 안전 패딩
+  edgePadding: 18,
+};
 
 function todayDateKorea() {
   return new Intl.DateTimeFormat('en-CA', {
@@ -920,6 +957,9 @@ function renderMenus(restaurants) {
 
     const danmaku = document.createElement('div');
     danmaku.className = 'danmaku';
+    const voteBurstLayer = document.createElement('div');
+    voteBurstLayer.className = 'vote-burst-layer';
+    voteBurstLayer.setAttribute('aria-hidden', 'true');
 
     const img = document.createElement('img');
     img.alt = `${titleName.textContent} 메뉴`;
@@ -966,6 +1006,7 @@ function renderMenus(restaurants) {
     wrap.appendChild(img);
     wrap.appendChild(pinballLayer);
     wrap.appendChild(danmaku);
+    wrap.appendChild(voteBurstLayer);
     wrap.appendChild(actions);
     card.appendChild(title);
     card.appendChild(wrap);
@@ -983,6 +1024,10 @@ function renderMenus(restaurants) {
       emojiCrownMerge: {},
       comments: [],
     };
+    let voteCombo = 0;
+    let voteComboLastAt = 0;
+    let comboStampSeq = 0;
+    let warningLastAt = 0;
 
     const restaurantDocRef = doc(db, 'menus', 'current', 'restaurants', rid);
     const commentsColRef = collection(db, 'menus', 'current', 'restaurants', rid, 'comments');
@@ -1794,6 +1839,622 @@ function renderMenus(restaurants) {
       debugEl.textContent = lines.join('\n');
     }
 
+    function getNextVoteCombo() {
+      const now = Date.now();
+      if (now - voteComboLastAt > VOTE_COMBO_RESET_MS) {
+        voteCombo = 0;
+      }
+      voteCombo += 1;
+      voteComboLastAt = now;
+      return voteCombo;
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function getComboPalette(combo) {
+      // 1~100: 초록 -> 노랑 -> 주황 -> 빨강 -> 검정(연속 보간)
+      const c = Math.max(1, Math.min(100, combo));
+      const stops = [
+        { at: 1, h: 132, s: 95, l: 54 },
+        { at: 25, h: 52, s: 98, l: 58 },
+        { at: 50, h: 28, s: 99, l: 54 },
+        { at: 75, h: 2, s: 100, l: 52 },
+        { at: 100, h: 0, s: 0, l: 7 },
+      ];
+      for (let i = 0; i < stops.length - 1; i += 1) {
+        const a = stops[i];
+        const b = stops[i + 1];
+        if (c >= a.at && c <= b.at) {
+          const t = (c - a.at) / (b.at - a.at || 1);
+          return {
+            h: lerp(a.h, b.h, t),
+            s: lerp(a.s, b.s, t),
+            l: lerp(a.l, b.l, t),
+          };
+        }
+      }
+      return { h: 0, s: 0, l: 7 };
+    }
+
+    function heatColorForCombo(combo, jitter = 0, alpha = 1) {
+      const a = Math.max(0.15, Math.min(1, alpha));
+      if (combo >= VOTE_COMBO_RAINBOW_STAGE) {
+        const hueSeed = (Math.floor(Date.now() / 10) + combo * 19 + jitter * 7) % 360;
+        return `hsl(${hueSeed} 100% 62% / ${a})`;
+      }
+      const base = getComboPalette(combo);
+      const pulse = combo >= 60 ? Math.sin((combo + jitter) * 0.36) * 3.2 : 0;
+      const h = (base.h + jitter * 0.12 + 360) % 360;
+      const s = Math.max(0, Math.min(100, base.s + (combo >= 35 ? 2 : 0)));
+      const l = Math.max(5, Math.min(72, base.l + pulse));
+      return `hsl(${h} ${s}% ${l}% / ${a})`;
+    }
+
+    function comboLabelStyle(combo) {
+      if (combo >= VOTE_COMBO_RAINBOW_STAGE) {
+        // 100+ 콤보는 확실한 무지개(시간/콤보 모두 반영)
+        const hue = (Math.floor(Date.now() / 8) + combo * 17) % 360;
+        return {
+          color: `hsl(${hue} 100% 66%)`,
+          glowColor: `hsla(${(hue + 36) % 360} 100% 72% / 0.86)`,
+          strokeColor: 'rgba(10, 10, 14, 0.9)',
+          strokeWidth: combo >= 200 ? 1.45 : 1.2,
+        };
+      }
+      const base = getComboPalette(combo);
+      const nearBlack = combo >= 86;
+      if (nearBlack) {
+        return {
+          color: 'hsl(0 0% 6%)',
+          glowColor: 'rgba(255, 52, 52, 0.92)',
+          strokeColor: 'rgba(255, 72, 72, 0.98)',
+          strokeWidth: 1.38,
+        };
+      }
+      const cHue = (base.h + 360) % 360;
+      const cSat = Math.max(90, Math.min(100, base.s + 5));
+      const cLight = Math.max(40, Math.min(66, base.l + 2));
+      return {
+        color: `hsl(${cHue} ${cSat}% ${cLight}%)`,
+        glowColor: `hsla(${cHue} ${Math.min(100, cSat + 2)}% ${Math.min(74, cLight + 8)}% / 0.78)`,
+        strokeColor: 'rgba(12, 14, 20, 0.9)',
+        strokeWidth: 1.12,
+      };
+    }
+
+    function spawnVoteBurst(combo, sourceEl, originPoint) {
+      if (!voteBurstLayer) return;
+      const layerRect = voteBurstLayer.getBoundingClientRect();
+      if (layerRect.width <= 0 || layerRect.height <= 0) return;
+
+      let originX = layerRect.width * 0.5;
+      let originY = layerRect.height * 0.64;
+      const hasPointer =
+        originPoint &&
+        Number.isFinite(originPoint.x) &&
+        Number.isFinite(originPoint.y) &&
+        originPoint.x > 0 &&
+        originPoint.y > 0;
+      if (hasPointer) {
+        originX = originPoint.x - layerRect.left;
+        originY = originPoint.y - layerRect.top;
+      } else if (sourceEl instanceof HTMLElement) {
+        const br = sourceEl.getBoundingClientRect();
+        originX = br.left - layerRect.left + br.width / 2;
+        originY = br.top - layerRect.top + br.height / 2;
+      }
+      originX += VOTE_FX_TUNE.originOffsetX;
+      originY += VOTE_FX_TUNE.originOffsetY;
+
+      const prefersReduce =
+        window.matchMedia &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const rainbowStage = combo >= VOTE_COMBO_RAINBOW_STAGE;
+      const questionChance = rainbowStage ? 1 : 0;
+      const rainbowPulseLv =
+        combo >= 150 ? Math.max(0, Math.min(1, (combo - 150) / 220)) : 0;
+      const rainbowColor = (seed = 0) => {
+        const hue = (Math.floor(Date.now() / (12 - rainbowPulseLv * 5)) + combo * 24 + seed * 41) % 360;
+        const pulse = Math.sin((Date.now() / 55 + seed * 0.8 + combo) * (1 + rainbowPulseLv * 0.8));
+        const light = 60 + pulse * (8 + rainbowPulseLv * 12);
+        return `hsl(${hue} 100% ${Math.max(44, Math.min(80, light))}%)`;
+      };
+      const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+      const spawnText = ({
+        text,
+        size,
+        dx,
+        dy,
+        duration,
+        delay,
+        color,
+        z = 0,
+        textShadow,
+        strokeWidth = 0,
+        strokeColor = 'transparent',
+        pulseStrength = 0,
+      }) => {
+        const el = document.createElement('span');
+        el.className = 'vote-burst-text';
+        el.textContent = text;
+        el.style.left = `${originX}px`;
+        el.style.top = `${originY}px`;
+        el.style.fontSize = `${size}px`;
+        el.style.color = color;
+        el.style.zIndex = String(10 + z);
+        if (textShadow) el.style.textShadow = textShadow;
+        if (strokeWidth > 0) {
+          el.style.webkitTextStroke = `${strokeWidth}px ${strokeColor}`;
+        }
+        voteBurstLayer.appendChild(el);
+
+        const p = Math.max(0, Math.min(1, pulseStrength));
+        const kf =
+          p > 0
+            ? [
+                { transform: 'translate(0px, 0px) scale(0.5)', opacity: 0, filter: 'blur(1px)' },
+                { offset: 0.16, transform: 'translate(0px, 0px) scale(1)', opacity: 1, filter: 'blur(0px)' },
+                {
+                  offset: 0.4,
+                  transform: `translate(${Math.round(dx * 0.38)}px, ${Math.round(dy * 0.38)}px) scale(${1.04 + p * 0.18})`,
+                  opacity: 1,
+                  filter: 'blur(0px)',
+                },
+                {
+                  offset: 0.58,
+                  transform: `translate(${Math.round(dx * 0.56)}px, ${Math.round(dy * 0.56)}px) scale(${0.94 + p * 0.12})`,
+                  opacity: 1,
+                  filter: `blur(${0.1 + p * 0.25}px)`,
+                },
+                {
+                  offset: 0.74,
+                  transform: `translate(${Math.round(dx * 0.76)}px, ${Math.round(dy * 0.76)}px) scale(${1.08 + p * 0.24})`,
+                  opacity: 1,
+                  filter: 'blur(0px)',
+                },
+                {
+                  transform: `translate(${Math.round(dx)}px, ${Math.round(dy + 28 + Math.random() * 22)}px) scale(0.82)`,
+                  opacity: 0,
+                  filter: 'blur(0.6px)',
+                },
+              ]
+            : [
+                { transform: 'translate(0px, 0px) scale(0.5)', opacity: 0, filter: 'blur(1px)' },
+                { offset: 0.18, transform: 'translate(0px, 0px) scale(1)', opacity: 1, filter: 'blur(0px)' },
+                {
+                  offset: 0.68,
+                  transform: `translate(${Math.round(dx * 0.72)}px, ${Math.round(dy * 0.72)}px) scale(1.08)`,
+                  opacity: 1,
+                  filter: 'blur(0px)',
+                },
+                {
+                  transform: `translate(${Math.round(dx)}px, ${Math.round(dy + 28 + Math.random() * 22)}px) scale(0.82)`,
+                  opacity: 0,
+                  filter: 'blur(0.6px)',
+                },
+              ];
+        const anim = el.animate(kf, {
+          duration,
+          delay,
+          easing: 'cubic-bezier(0.2, 0.9, 0.2, 1)',
+          fill: 'forwards',
+        });
+        anim.onfinish = () => el.remove();
+        window.setTimeout(() => {
+          if (el.parentNode) el.remove();
+        }, duration + delay + 220);
+      };
+
+      const spawnComboStamp = (text, style) => {
+        comboStampSeq += 1;
+        const lane = comboStampSeq % 4;
+        // 300+부터 100단위로 콤보 타격감 강화 (300/400/500...)
+        const comboImpactTier = combo >= 300 ? Math.floor((combo - 300) / 100) + 1 : 0;
+        const x = clamp(
+          originX + VOTE_FX_TUNE.comboOffsetX + Math.random() * VOTE_FX_TUNE.comboJitterX,
+          VOTE_FX_TUNE.edgePadding,
+          layerRect.width - VOTE_FX_TUNE.edgePadding,
+        );
+        const y = clamp(
+          originY +
+            VOTE_FX_TUNE.comboOffsetY -
+            lane * VOTE_FX_TUNE.comboLaneGapY +
+            Math.random() * VOTE_FX_TUNE.comboJitterY,
+          VOTE_FX_TUNE.edgePadding,
+          layerRect.height - VOTE_FX_TUNE.edgePadding,
+        );
+        const el = document.createElement('span');
+        el.className = 'vote-burst-text';
+        el.textContent = text;
+        el.style.left = `${x}px`;
+        el.style.top = `${y}px`;
+        el.style.fontSize = `${(combo >= 100 ? 30 : Math.min(24, 14 + Math.floor(combo * 0.34))) + Math.min(10, comboImpactTier * 1.4)}px`;
+        el.style.color = style.color;
+        el.style.zIndex = '30';
+        el.style.textShadow =
+          `0 2px 12px rgba(0,0,0,0.62), 0 0 18px ${style.glowColor}, 0 0 32px ${style.glowColor}`;
+        el.style.webkitTextStroke = `${style.strokeWidth + Math.min(1.1, comboImpactTier * 0.18)}px ${style.strokeColor}`;
+        voteBurstLayer.appendChild(el);
+        const anim = el.animate(
+          comboImpactTier > 0
+            ? [
+                { transform: 'translate(0, 16px) scale(0.62)', opacity: 0 },
+                {
+                  offset: 0.18,
+                  transform: `translate(0, 2px) scale(${1.28 + comboImpactTier * 0.08 + rainbowPulseLv * 0.24})`,
+                  opacity: 1,
+                },
+                {
+                  offset: 0.34,
+                  transform: `translate(0, -1px) scale(${0.9 + comboImpactTier * 0.04})`,
+                  opacity: 1,
+                },
+                {
+                  offset: 0.5,
+                  transform: `translate(0, -3px) scale(${1.18 + comboImpactTier * 0.06 + rainbowPulseLv * 0.2})`,
+                  opacity: 1,
+                },
+                {
+                  offset: 0.72,
+                  transform: `translate(0, -4px) scale(${1.02 + comboImpactTier * 0.03 + rainbowPulseLv * 0.18})`,
+                  opacity: 1,
+                },
+                { transform: 'translate(0, -10px) scale(0.9)', opacity: 0 },
+              ]
+            : [
+                { transform: 'translate(0, 10px) scale(0.72)', opacity: 0 },
+                {
+                  offset: 0.24,
+                  transform: `translate(0, 0px) scale(${1.06 + rainbowPulseLv * 0.2})`,
+                  opacity: 1,
+                },
+                {
+                  offset: 0.48,
+                  transform: `translate(0, -2px) scale(${1 + rainbowPulseLv * 0.26})`,
+                  opacity: 1,
+                },
+                {
+                  offset: 0.7,
+                  transform: `translate(0, -3px) scale(${1.02 + rainbowPulseLv * 0.32})`,
+                  opacity: 1,
+                },
+                { transform: 'translate(0, -8px) scale(0.92)', opacity: 0 },
+              ],
+          {
+            duration:
+              comboImpactTier > 0
+                ? Math.max(
+                    480,
+                    (combo >= 100 ? Math.max(620, 860 - Math.round(rainbowPulseLv * 140)) : 680) -
+                      comboImpactTier * 45,
+                  )
+                : combo >= 100
+                ? Math.max(620, 860 - Math.round(rainbowPulseLv * 140))
+                : 680,
+            easing: 'cubic-bezier(0.2, 0.9, 0.2, 1)',
+            fill: 'forwards',
+          },
+        );
+        anim.onfinish = () => el.remove();
+        window.setTimeout(() => {
+          if (el.parentNode) el.remove();
+        }, (combo >= 100 ? 860 : 680) + 220);
+
+        // 타격감 tier가 있으면 잔상 스탬프를 한 번 더 찍어 "팡팡" 느낌 강화
+        if (comboImpactTier > 0) {
+          const echo = document.createElement('span');
+          echo.className = 'vote-burst-text';
+          echo.textContent = text;
+          echo.style.left = `${x + 2}px`;
+          echo.style.top = `${y + 1}px`;
+          echo.style.fontSize = `${(combo >= 100 ? 30 : Math.min(24, 14 + Math.floor(combo * 0.34))) + Math.min(12, comboImpactTier * 1.6)}px`;
+          echo.style.color = style.color;
+          echo.style.zIndex = '29';
+          echo.style.opacity = '0.75';
+          echo.style.textShadow = `0 0 ${14 + comboImpactTier * 3}px ${style.glowColor}`;
+          echo.style.webkitTextStroke = `${style.strokeWidth}px ${style.strokeColor}`;
+          voteBurstLayer.appendChild(echo);
+          const echoAnim = echo.animate(
+            [
+              { transform: 'translate(0, 8px) scale(0.7)', opacity: 0 },
+              { offset: 0.28, transform: `translate(0, -1px) scale(${1.18 + comboImpactTier * 0.08})`, opacity: 0.72 },
+              { transform: 'translate(0, -8px) scale(0.88)', opacity: 0 },
+            ],
+            {
+              duration: Math.max(360, 560 - comboImpactTier * 35),
+              delay: 28,
+              easing: 'cubic-bezier(0.2, 0.9, 0.2, 1)',
+              fill: 'forwards',
+            },
+          );
+          echoAnim.onfinish = () => echo.remove();
+          window.setTimeout(() => {
+            if (echo.parentNode) echo.remove();
+          }, 760);
+        }
+      };
+
+      const spawnLikeRise = (text, color) => {
+        const el = document.createElement('span');
+        el.className = 'vote-burst-text';
+        el.textContent = text;
+        el.style.left = `${originX}px`;
+        el.style.top = `${originY}px`;
+        el.style.fontSize = '26px';
+        el.style.color = color;
+        el.style.zIndex = '26';
+        el.style.textShadow =
+          '0 2px 10px rgba(0,0,0,0.55), 0 0 14px rgba(255,255,255,0.25)';
+        el.style.webkitTextStroke = '0.6px rgba(8, 8, 8, 0.5)';
+        voteBurstLayer.appendChild(el);
+        const anim = el.animate(
+          [
+            { transform: 'translate(0px, 0px) scale(0.72)', opacity: 0 },
+            { offset: 0.2, transform: 'translate(0px, -4px) scale(1.08)', opacity: 1 },
+            { offset: 0.55, transform: 'translate(0px, -18px) scale(1)', opacity: 1 },
+            { transform: 'translate(0px, -46px) scale(0.94)', opacity: 0 },
+          ],
+          {
+            duration: 980,
+            easing: 'cubic-bezier(0.18, 0.85, 0.22, 1)',
+            fill: 'forwards',
+          },
+        );
+        anim.onfinish = () => el.remove();
+        window.setTimeout(() => {
+          if (el.parentNode) el.remove();
+        }, 1250);
+      };
+
+      const triggerWarningAlert = () => {
+        if (combo < 150 || prefersReduce) return;
+        const now = Date.now();
+        if (now - warningLastAt < VOTE_FX_TUNE.warningCooldownMs) return;
+        warningLastAt = now;
+        const lv = Math.max(0, Math.min(1, (combo - 150) / 220));
+        // 150 이후 50콤보 단위로 강도 업 (150~199:0, 200~249:1, 250~299:2 ...)
+        const tier50 = Math.max(0, Math.floor((combo - 150) / 50));
+        // 500 이후 25콤보 단위로 흔들림 강도 업
+        const shakeTier25 = combo >= 500 ? Math.floor((combo - 500) / 25) + 1 : 0;
+        const shakeAmpX = Math.min(18, shakeTier25 * 1.35);
+        const shakeAmpY = Math.min(10, shakeTier25 * 0.8);
+        const mixX = Math.max(0, Math.min(1, VOTE_FX_TUNE.warningAnchorMixX));
+        const mixY = Math.max(0, Math.min(1, VOTE_FX_TUNE.warningAnchorMixY));
+        const comboBaseX = originX + VOTE_FX_TUNE.comboOffsetX;
+        const comboBaseY = originY + VOTE_FX_TUNE.comboOffsetY;
+        const anchorX =
+          originX + (comboBaseX - originX) * mixX + VOTE_FX_TUNE.warningOffsetX;
+        const anchorY =
+          originY + (comboBaseY - originY) * mixY + VOTE_FX_TUNE.warningOffsetY;
+
+        const warn = document.createElement('span');
+        warn.className = 'vote-burst-text';
+        warn.textContent = 'Warning! Warning!';
+        warn.style.left = `${clamp(anchorX, VOTE_FX_TUNE.edgePadding, layerRect.width - VOTE_FX_TUNE.edgePadding)}px`;
+        // 문구는 빛보다 위에 보이도록 살짝 위로
+        warn.style.top = `${clamp(anchorY - 10, VOTE_FX_TUNE.edgePadding, layerRect.height - VOTE_FX_TUNE.edgePadding)}px`;
+        warn.style.fontWeight = '900';
+        warn.style.fontSize = `${17 + lv * 9 + tier50 * 2.2}px`;
+        warn.style.letterSpacing = '0.03em';
+        warn.style.zIndex = '36';
+        warn.style.color = 'hsl(0 100% 56%)';
+        warn.style.webkitTextStroke = `${1 + Math.min(1.5, tier50 * 0.28)}px rgba(12, 12, 12, 0.92)`;
+        warn.style.textShadow =
+          `0 2px 10px rgba(0,0,0,0.82), 0 0 ${14 + Math.min(16, tier50 * 3)}px rgba(255,40,40,0.86), 0 0 ${24 + Math.min(26, tier50 * 4)}px rgba(255,40,40,0.56)`;
+        voteBurstLayer.appendChild(warn);
+
+        const travel =
+          (VOTE_FX_TUNE.warningTravelX + lv * 42) *
+          Math.max(0.1, VOTE_FX_TUNE.warningTravelScale);
+        const dur = Math.max(1200, Math.round(VOTE_FX_TUNE.warningDurationMs + lv * 700));
+        const warnAnim = warn.animate(
+          [
+            {
+              transform: `translate(${travel}px, 0px) scale(${0.96 + lv * 0.08})`,
+              opacity: 0,
+            },
+            {
+              offset: 0.12,
+              transform: `translate(${travel * 0.74}px, ${-shakeAmpY}px) scale(${1.02 + lv * 0.08})`,
+              opacity: 1,
+            },
+            {
+              offset: 0.28,
+              transform: `translate(${travel * 0.48 - shakeAmpX}px, ${shakeAmpY}px) scale(${1.03 + lv * 0.1})`,
+              opacity: 0.34,
+            },
+            {
+              offset: 0.42,
+              transform: `translate(${travel * 0.22 + shakeAmpX}px, ${-shakeAmpY}px) scale(${1.05 + lv * 0.12})`,
+              opacity: 1,
+            },
+            {
+              offset: 0.56,
+              transform: `translate(${-travel * 0.08 - shakeAmpX}px, ${shakeAmpY}px) scale(${1.03 + lv * 0.09})`,
+              opacity: 0.36,
+            },
+            {
+              offset: 0.7,
+              transform: `translate(${-travel * 0.38 + shakeAmpX}px, ${-shakeAmpY}px) scale(${1.02 + lv * 0.08})`,
+              opacity: 1,
+            },
+            {
+              offset: 0.84,
+              transform: `translate(${-travel * 0.68 - shakeAmpX}px, ${shakeAmpY}px) scale(0.98)`,
+              opacity: 0.46,
+            },
+            {
+              transform: `translate(${-travel}px, ${-shakeAmpY * 0.5}px) scale(0.9)`,
+              opacity: 0,
+            },
+          ],
+          {
+            duration: dur,
+            easing: 'linear',
+            fill: 'forwards',
+          },
+        );
+        warnAnim.onfinish = () => warn.remove();
+
+        const beacon = document.createElement('span');
+        beacon.className = 'vote-burst-text';
+        beacon.textContent = '';
+        beacon.style.display = 'block';
+        beacon.style.left = `${clamp(anchorX, VOTE_FX_TUNE.edgePadding, layerRect.width - VOTE_FX_TUNE.edgePadding)}px`;
+        // 빛은 문구 아래 배경으로
+        beacon.style.top = `${clamp(anchorY + 4, VOTE_FX_TUNE.edgePadding, layerRect.height - VOTE_FX_TUNE.edgePadding)}px`;
+        const w = 124 + lv * 86 + Math.min(84, tier50 * 12);
+        const h = 34 + lv * 18 + Math.min(26, tier50 * 4);
+        beacon.style.width = `${w}px`;
+        beacon.style.height = `${h}px`;
+        beacon.style.marginLeft = `${-w / 2}px`;
+        beacon.style.marginTop = `${-h / 2}px`;
+        beacon.style.borderRadius = '999px';
+        beacon.style.zIndex = '33';
+        beacon.style.background =
+          'linear-gradient(90deg, rgba(255,25,25,0.58), rgba(8,8,10,0.2) 32%, rgba(255,25,25,0.68) 52%, rgba(8,8,10,0.2) 74%, rgba(255,25,25,0.58))';
+        beacon.style.filter = `blur(${1 + lv * 1.3 + Math.min(1.8, tier50 * 0.28)}px)`;
+        beacon.style.boxShadow =
+          `0 0 ${20 + Math.min(18, tier50 * 3)}px rgba(255,30,30,0.6), 0 0 ${28 + Math.min(22, tier50 * 3.5)}px rgba(0,0,0,0.48)`;
+        voteBurstLayer.appendChild(beacon);
+        const beaconAnim = beacon.animate(
+          [
+            {
+              transform: `translate(${travel}px,0px) scaleX(0.5)`,
+              opacity: 0,
+            },
+            {
+              offset: 0.14,
+              transform: `translate(${travel * 0.7}px,${-shakeAmpY * 0.65}px) scaleX(1)`,
+              opacity: 0.78,
+            },
+            {
+              offset: 0.33,
+              transform: `translate(${travel * 0.36 - shakeAmpX * 0.8}px,${shakeAmpY * 0.65}px) scaleX(1.08)`,
+              opacity: 0.34,
+            },
+            {
+              offset: 0.52,
+              transform: `translate(${travel * 0.02 + shakeAmpX * 0.8}px,${-shakeAmpY * 0.65}px) scaleX(1.12)`,
+              opacity: 0.8,
+            },
+            {
+              offset: 0.72,
+              transform: `translate(${-travel * 0.42 - shakeAmpX * 0.8}px,${shakeAmpY * 0.65}px) scaleX(1.06)`,
+              opacity: 0.32,
+            },
+            {
+              offset: 0.88,
+              transform: `translate(${-travel * 0.76 + shakeAmpX * 0.8}px,${-shakeAmpY * 0.65}px) scaleX(0.92)`,
+              opacity: 0.7,
+            },
+            { transform: `translate(${-travel}px,${shakeAmpY * 0.3}px) scaleX(0.56)`, opacity: 0 },
+          ],
+          {
+            duration: dur,
+            easing: 'linear',
+            fill: 'forwards',
+          },
+        );
+        beaconAnim.onfinish = () => beacon.remove();
+      };
+
+      const triggerHeavyHit = () => {
+        if (combo < 200 || prefersReduce) return;
+        const lv = Math.max(0, Math.min(1, (combo - 200) / 280));
+        try {
+          voteBurstLayer.animate(
+            [
+              { transform: 'translate3d(0px,0px,0) scale(1)' },
+              {
+                offset: 0.25,
+                transform: `translate3d(${(Math.random() - 0.5) * (6 + lv * 8)}px, ${(Math.random() - 0.5) * (4 + lv * 6)}px,0) scale(${1 + lv * 0.03})`,
+              },
+              { transform: 'translate3d(0px,0px,0) scale(1)' },
+            ],
+            {
+              duration: Math.max(90, 140 - lv * 35),
+              easing: 'cubic-bezier(0.2, 0.9, 0.2, 1)',
+            },
+          );
+        } catch {
+          // ignore
+        }
+
+        const ring = document.createElement('span');
+        ring.className = 'vote-burst-text';
+        ring.textContent = '';
+        ring.style.left = `${originX}px`;
+        ring.style.top = `${originY}px`;
+        ring.style.display = 'block';
+        ring.style.width = `${26 + lv * 22}px`;
+        ring.style.height = `${26 + lv * 22}px`;
+        ring.style.marginLeft = `${-(13 + lv * 11)}px`;
+        ring.style.marginTop = `${-(13 + lv * 11)}px`;
+        ring.style.borderRadius = '999px';
+        ring.style.border = `${1.5 + lv * 1.8}px solid rgba(255,255,255,0.9)`;
+        ring.style.boxShadow =
+          `0 0 16px rgba(255,255,255,0.48), 0 0 30px rgba(255,64,64,${0.46 + lv * 0.34})`;
+        ring.style.background = 'transparent';
+        ring.style.zIndex = '36';
+        voteBurstLayer.appendChild(ring);
+        const ringAnim = ring.animate(
+          [
+            { transform: 'scale(0.3)', opacity: 0.9, filter: 'blur(0px)' },
+            { transform: `scale(${1.2 + lv * 0.85})`, opacity: 0, filter: 'blur(0.7px)' },
+          ],
+          {
+            duration: Math.max(130, 220 - lv * 60),
+            easing: 'cubic-bezier(0.2, 0.9, 0.2, 1)',
+            fill: 'forwards',
+          },
+        );
+        ringAnim.onfinish = () => ring.remove();
+        window.setTimeout(() => {
+          if (ring.parentNode) ring.remove();
+        }, 320);
+      };
+
+      const mainText = rainbowStage ? '?' : Math.random() < questionChance ? '?' : '+1';
+      if (!rainbowStage && combo <= 10) {
+        // 초반 1~10은 콤보감보다 "좋아요 버튼" 같은 단독 상승 느낌
+        spawnLikeRise(mainText, heatColorForCombo(combo, Math.random() * 6 - 3));
+      } else {
+        spawnText({
+          text: mainText,
+          size: Math.min(34, 22 + Math.floor(combo * 0.8)),
+          dx: (Math.random() - 0.5) * 26,
+          // +1은 클릭 좌표 근처에서 시작해 살짝 위로만
+          dy: -34 - Math.min(28, combo * 1.1),
+          duration: Math.max(360, 620 - combo * 8),
+          delay: 0,
+          color: rainbowStage
+            ? rainbowColor()
+            : heatColorForCombo(combo, Math.random() * 10 - 5),
+          pulseStrength: rainbowStage ? rainbowPulseLv : 0,
+          z: 2,
+        });
+      }
+
+      triggerWarningAlert();
+      triggerHeavyHit();
+
+      if (combo >= 11 && !rainbowStage) {
+        spawnComboStamp(`x${combo}`, comboLabelStyle(combo));
+      }
+
+      if (combo >= VOTE_COMBO_RAINBOW_STAGE) {
+        const tier = Math.floor(combo / 100);
+        const marks = '!'.repeat(Math.max(1, Math.min(8, tier)));
+        spawnComboStamp(`x${combo}${marks}`, comboLabelStyle(combo));
+      }
+
+      // 회오리처럼 퍼지는 보조 파티클은 제거(요청사항)
+    }
+
     function renderEmojiButtons() {
       emojiRow.innerHTML = '';
       for (const e of EMOJIS) {
@@ -1804,6 +2465,13 @@ function renderMenus(restaurants) {
         // 공용 투표라 active 표시는 하지 않음(로그인 없이 개인 상태 추적 불가)
         b.addEventListener('click', (ev) => {
           ev.stopPropagation();
+          const combo = getNextVoteCombo();
+          const source = ev.currentTarget instanceof HTMLElement ? ev.currentTarget : null;
+          const pointer =
+            Number.isFinite(ev.clientX) && Number.isFinite(ev.clientY)
+              ? { x: ev.clientX, y: ev.clientY }
+              : null;
+          spawnVoteBurst(combo, source, pointer);
           // 클릭 즉시 로컬에 낙관적 반영(스냅샷/네트워크 딜레이 체감 감소)
           const prev = Math.max(0, Math.floor(Number(state.emojiCounts[e]) || 0));
           state.emojiCounts = { ...state.emojiCounts, [e]: prev + 1 };
