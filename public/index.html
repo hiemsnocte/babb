@@ -43,6 +43,8 @@
         flex-direction: column;
         align-items: center;
         padding: 1.5rem 1rem 2rem;
+        user-select: none;
+        -webkit-user-select: none;
       }
       header {
         text-align: center;
@@ -373,6 +375,8 @@
         background: rgba(255, 255, 255, 0.08);
         color: #fff;
         outline: none;
+        user-select: text;
+        -webkit-user-select: text;
       }
       .comment-row input:focus,
       .comment-row input:focus-visible {
@@ -544,6 +548,114 @@
         pointer-events: none;
         overflow: hidden;
         z-index: 5;
+      }
+      .destroy-streak-layer {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 6;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        padding-top: clamp(8px, 2.2vw, 16px);
+      }
+      .destroy-streak-hud {
+        --destroy-grave-glow:
+          0 0 26px rgba(0, 0, 0, 1),
+          0 0 50px rgba(0, 0, 0, 1),
+          0 0 94px rgba(0, 0, 0, 1),
+          0 0 162px rgba(0, 0, 0, 0.98),
+          0 0 252px rgba(0, 0, 0, 0.95);
+        --destroy-number-glow:
+          0 0 30px rgba(0, 0, 0, 1),
+          0 0 58px rgba(0, 0, 0, 1),
+          0 0 108px rgba(0, 0, 0, 1),
+          0 0 186px rgba(0, 0, 0, 0.98),
+          0 0 286px rgba(0, 0, 0, 0.95);
+        text-align: center;
+        user-select: none;
+        will-change: transform, opacity;
+        transform-origin: 50% 0%;
+      }
+      .destroy-streak-line {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 7px;
+      }
+      .destroy-streak-grave {
+        font-size: clamp(24px, 4.5vw, 36px);
+        font-weight: 900;
+        line-height: 1;
+        color: #fff;
+        text-shadow: var(--destroy-grave-glow);
+        letter-spacing: 0.01em;
+      }
+      .destroy-streak-number {
+        font-size: clamp(30px, 5.9vw, 48px);
+        font-weight: 950;
+        line-height: 1;
+        color: #fff3ef;
+        text-shadow: var(--destroy-number-glow);
+        letter-spacing: 0.02em;
+      }
+      .destroy-streak-message-fx {
+        --destroy-message-stroke: 1.5px rgba(0, 0, 0, 0.96);
+        --destroy-message-glow:
+          0 2px 8px rgba(0, 0, 0, 0.72),
+          0 0 18px rgba(0, 0, 0, 0.72),
+          0 0 36px rgba(0, 0, 0, 0.6);
+        position: absolute;
+        left: 50%;
+        top: clamp(54px, 10.5vw, 82px);
+        transform: translateX(-50%);
+        font-size: clamp(22px, 4.1vw, 34px);
+        font-weight: 950;
+        line-height: 1;
+        color: #ff4b4b;
+        text-align: center;
+        white-space: nowrap;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        pointer-events: none;
+        user-select: none;
+        padding: 0;
+        border: none;
+        background: transparent !important;
+        box-shadow: none !important;
+        backdrop-filter: none !important;
+        will-change: transform, opacity;
+        contain: none;
+        -webkit-text-stroke: var(--destroy-message-stroke);
+        text-shadow: var(--destroy-message-glow);
+      }
+      .destroy-streak-message-fx.calm {
+        color: #fff;
+        -webkit-text-stroke: 0 transparent;
+        text-shadow:
+          0 0 10px rgba(0, 0, 0, 0.95),
+          0 0 22px rgba(0, 0, 0, 0.92),
+          0 0 40px rgba(0, 0, 0, 0.86),
+          0 0 72px rgba(0, 0, 0, 0.78);
+      }
+      .destroy-streak-message-fx.impact {
+        animation: destroy-msg-shake 209ms linear infinite;
+      }
+      @keyframes destroy-msg-shake {
+        0% {
+          transform: translate3d(calc(-50% - 3.63px), 0, 0);
+        }
+        25% {
+          transform: translate3d(calc(-50% + 3.63px), 0, 0);
+        }
+        50% {
+          transform: translate3d(calc(-50% - 3.63px), 0, 0);
+        }
+        75% {
+          transform: translate3d(calc(-50% + 3.63px), 0, 0);
+        }
+        100% {
+          transform: translate3d(calc(-50% - 3.63px), 0, 0);
+        }
       }
       .vote-burst-text {
         position: absolute;

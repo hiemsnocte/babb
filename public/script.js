@@ -763,6 +763,79 @@ const VOTE_FX_TUNE = {
   // 레이어 끝에서 잘리지 않도록 안전 패딩
   edgePadding: 18,
 };
+/**
+ * 파괴(충돌 패배) 연출 문구 설정.
+ * - at: 이 수치 이상부터 해당 구간 멘트 사용
+ * - tagline: 하단 멘트 (원하는 문구로 직접 수정)
+ * - accent: 강조색(선택)
+ */
+const DESTROY_STREAK_ALERTS = [
+  {
+    at: 10,
+    tagline: 'Rampage!',
+    accent: 'rgba(255, 92, 92, 0.88)',
+  },
+  {
+    at: 30,
+    tagline: 'No Mercy!!',
+    accent: 'rgba(255, 108, 70, 0.9)',
+  },
+  {
+    at: 50,
+    tagline: 'Bloodbath!!!',
+    accent: 'rgba(255, 130, 72, 0.9)',
+  },
+  {
+    at: 100,
+    tagline: 'Massacre!!!!',
+    accent: 'rgba(255, 156, 72, 0.92)',
+  },
+  {
+    at: 300,
+    tagline: 'Extermination!!!!!',
+    accent: 'rgba(255, 184, 84, 0.94)',
+  },
+  {
+    at: 500,
+    tagline: 'Why? We dying?',
+    accent: 'rgba(255, 214, 122, 0.95)',
+  },
+  {
+    at: 1000,
+    tagline: 'Endless War...',
+    accent: 'rgba(255, 178, 66, 0.92)',
+  },
+];
+/**
+ * [3분리 연출 튜닝]
+ * 1) GRAVE(🪦X): 콤보 동안 고정
+ * 2) NUMBER(숫자): 콤보마다 갱신
+ * 3) MESSAGE(구간 문구): 구간 진입 시 1회 노출
+ *
+ * 각 파트별 글로우를 독립적으로 조절할 수 있습니다.
+ */
+const DESTROY_HUD_STYLE_TUNE = {
+  graveGlow:
+    '0 0 26px rgba(0,0,0,1), 0 0 50px rgba(0,0,0,1), 0 0 94px rgba(0,0,0,1), 0 0 162px rgba(0,0,0,0.98), 0 0 252px rgba(0,0,0,0.95)',
+  numberGlow:
+    '0 0 30px rgba(0,0,0,1), 0 0 58px rgba(0,0,0,1), 0 0 108px rgba(0,0,0,1), 0 0 186px rgba(0,0,0,0.98), 0 0 286px rgba(0,0,0,0.95)',
+  messageGlow:
+    '0 0 18px rgba(0,0,0,1), 0 0 34px rgba(0,0,0,1), 0 0 62px rgba(0,0,0,0.98), 0 0 108px rgba(0,0,0,0.96), 0 0 168px rgba(0,0,0,0.92)',
+  messageStroke: '1.7px rgba(0, 0, 0, 0.95)',
+};
+/**
+ * 구간 메시지(3번)의 타격감/지속시간 튜닝.
+ * - showMs: 일반 구간 메시지 노출 시간(전체)
+ * - stage500ShowMs: 500~999 구간 메시지 노출 시간
+ * - calmShowMs: 1000+ 구간 노출 시간(무타격)
+ * - impactDurationMs: 타격 애니메이션 시간
+ */
+const DESTROY_MESSAGE_FX_TUNE = {
+  showMs: 2800,
+  stage500ShowMs: 10000,
+  calmShowMs: 30000,
+  impactDurationMs: 4300,
+};
 
 function todayDateKorea() {
   return new Intl.DateTimeFormat('en-CA', {
@@ -960,12 +1033,36 @@ function renderMenus(restaurants) {
     const voteBurstLayer = document.createElement('div');
     voteBurstLayer.className = 'vote-burst-layer';
     voteBurstLayer.setAttribute('aria-hidden', 'true');
+    const destroyStreakLayer = document.createElement('div');
+    destroyStreakLayer.className = 'destroy-streak-layer';
+    destroyStreakLayer.setAttribute('aria-hidden', 'true');
+    const destroyHud = document.createElement('div');
+    destroyHud.className = 'destroy-streak-hud';
+    destroyHud.hidden = true;
+    const destroyHudLine = document.createElement('div');
+    destroyHudLine.className = 'destroy-streak-line';
+    const destroyHudGrave = document.createElement('span');
+    destroyHudGrave.className = 'destroy-streak-grave';
+    destroyHudGrave.textContent = '🪦X';
+    const destroyHudNumber = document.createElement('span');
+    destroyHudNumber.className = 'destroy-streak-number';
+    destroyHudNumber.textContent = '0';
+    const destroyMessageFx = document.createElement('div');
+    destroyMessageFx.className = 'destroy-streak-message-fx';
+    destroyMessageFx.hidden = true;
+    destroyHudLine.appendChild(destroyHudGrave);
+    destroyHudLine.appendChild(destroyHudNumber);
+    destroyHud.appendChild(destroyHudLine);
+    destroyStreakLayer.appendChild(destroyHud);
+    destroyStreakLayer.appendChild(destroyMessageFx);
 
     const img = document.createElement('img');
     img.alt = `${titleName.textContent} 메뉴`;
     img.loading = 'lazy';
     img.decoding = 'async';
     img.src = r.imageUrl;
+    img.draggable = false;
+    img.addEventListener('dragstart', (ev) => ev.preventDefault());
 
     const actions = document.createElement('div');
     actions.className = 'menu-actions';
@@ -1007,6 +1104,7 @@ function renderMenus(restaurants) {
     wrap.appendChild(pinballLayer);
     wrap.appendChild(danmaku);
     wrap.appendChild(voteBurstLayer);
+    wrap.appendChild(destroyStreakLayer);
     wrap.appendChild(actions);
     card.appendChild(title);
     card.appendChild(wrap);
@@ -1028,6 +1126,9 @@ function renderMenus(restaurants) {
     let voteComboLastAt = 0;
     let comboStampSeq = 0;
     let warningLastAt = 0;
+    let destroyComboCount = 0;
+    let destroyMessageStageAt = 0;
+    let destroyMessageTimer = null;
 
     const restaurantDocRef = doc(db, 'menus', 'current', 'restaurants', rid);
     const commentsColRef = collection(db, 'menus', 'current', 'restaurants', rid, 'comments');
@@ -1616,6 +1717,85 @@ function renderMenus(restaurants) {
       }, 55);
     }
 
+    function getDestroyAlertByCount(count) {
+      let picked = null;
+      for (const item of DESTROY_STREAK_ALERTS) {
+        if (count >= item.at) picked = item;
+      }
+      return picked;
+    }
+
+    function isVoteComboWindowActive(now = Date.now()) {
+      return voteCombo > 0 && now - voteComboLastAt <= VOTE_COMBO_RESET_MS;
+    }
+
+    function hideDestroyStreakHud() {
+      destroyHud.hidden = true;
+      destroyHudNumber.textContent = '0';
+      destroyMessageStageAt = 0;
+      destroyMessageFx.hidden = true;
+      destroyMessageFx.textContent = '';
+      destroyMessageFx.classList.remove('impact', 'calm');
+      if (destroyMessageTimer != null) {
+        window.clearTimeout(destroyMessageTimer);
+        destroyMessageTimer = null;
+      }
+    }
+
+    function applyDestroyStyleTune() {
+      destroyHud.style.setProperty('--destroy-grave-glow', DESTROY_HUD_STYLE_TUNE.graveGlow);
+      destroyHud.style.setProperty('--destroy-number-glow', DESTROY_HUD_STYLE_TUNE.numberGlow);
+      destroyMessageFx.style.setProperty('--destroy-message-glow', DESTROY_HUD_STYLE_TUNE.messageGlow);
+      destroyMessageFx.style.setProperty('--destroy-message-stroke', DESTROY_HUD_STYLE_TUNE.messageStroke);
+    }
+    applyDestroyStyleTune();
+
+    function showDestroyStageMessage(alert, calmMode) {
+      destroyMessageFx.hidden = false;
+      destroyMessageFx.textContent = alert.tagline || 'Unstoppable!!';
+      destroyMessageFx.classList.toggle('calm', calmMode);
+      destroyMessageFx.style.setProperty(
+        '--destroy-msg-impact-ms',
+        `${Math.max(120, DESTROY_MESSAGE_FX_TUNE.impactDurationMs)}ms`,
+      );
+      destroyMessageFx.classList.remove('impact');
+      if (!calmMode) {
+        // 강제 reflow(offsetWidth) 없이 다음 프레임에 애니메이션 재생
+        window.requestAnimationFrame(() => {
+          destroyMessageFx.classList.add('impact');
+        });
+      }
+
+      if (destroyMessageTimer != null) window.clearTimeout(destroyMessageTimer);
+      const showMs = calmMode
+        ? Math.max(400, DESTROY_MESSAGE_FX_TUNE.calmShowMs)
+        : alert.at === 500
+        ? Math.max(300, DESTROY_MESSAGE_FX_TUNE.stage500ShowMs)
+        : Math.max(300, DESTROY_MESSAGE_FX_TUNE.showMs);
+      destroyMessageTimer = window.setTimeout(() => {
+        destroyMessageTimer = null;
+        destroyMessageFx.hidden = true;
+        destroyMessageFx.textContent = '';
+        destroyMessageFx.classList.remove('impact', 'calm');
+      }, showMs);
+    }
+
+    function renderDestroyStreakHud(count) {
+      const alert = getDestroyAlertByCount(count);
+      if (!alert || !destroyStreakLayer || count < 10) {
+        hideDestroyStreakHud();
+        return;
+      }
+
+      destroyHud.hidden = false;
+      destroyHudNumber.textContent = String(count);
+      if (destroyMessageStageAt !== alert.at) {
+        destroyMessageStageAt = alert.at;
+        const lastStageAt = DESTROY_STREAK_ALERTS[DESTROY_STREAK_ALERTS.length - 1]?.at;
+        showDestroyStageMessage(alert, alert.at === lastStageAt);
+      }
+    }
+
     function destroyLoserPinball(winner, loser, W, H) {
       const loserIsCrown = isCrownBall(loser);
       const li = pinballs.indexOf(loser);
@@ -1632,6 +1812,16 @@ function renderMenus(restaurants) {
       scheduleLivePersist(loser.emoji, -1);
       applyOptimisticSacrificeOne(loser.emoji);
       scheduleSacrificePersist(loser.emoji);
+      const now = Date.now();
+      // 파괴 콤보는 "투표 콤보 시간" 안에서만 누적/발동.
+      // 콤보 창이 닫힌 상태(클릭 안 하는 시간)에서는 희생이 일어나도 배너를 띄우지 않습니다.
+      if (!isVoteComboWindowActive(now)) {
+        destroyComboCount = 0;
+        hideDestroyStreakHud();
+      } else {
+        destroyComboCount += 1;
+        renderDestroyStreakHud(destroyComboCount);
+      }
 
       if (isCrownBall(winner)) {
         const wm = Math.floor(Number(state.emojiCrownMerge[winner.emoji]) || 0);
@@ -1733,6 +1923,10 @@ function renderMenus(restaurants) {
       const W = pinballLayer.clientWidth;
       const H = pinballLayer.clientHeight;
       if (W < 8 || H < 8) return;
+      if (!isVoteComboWindowActive() && destroyComboCount !== 0) {
+        destroyComboCount = 0;
+        hideDestroyStreakHud();
+      }
 
       for (const b of pinballs) {
         b.x += b.vx;
@@ -1843,6 +2037,8 @@ function renderMenus(restaurants) {
       const now = Date.now();
       if (now - voteComboLastAt > VOTE_COMBO_RESET_MS) {
         voteCombo = 0;
+        destroyComboCount = 0;
+        hideDestroyStreakHud();
       }
       voteCombo += 1;
       voteComboLastAt = now;
@@ -2438,6 +2634,31 @@ function renderMenus(restaurants) {
           z: 2,
         });
       }
+      if (combo >= 11) {
+        // 10콤보 이후에는 분사 수를 점진적으로 늘려 타격감을 살립니다.
+        const sprayText = combo >= VOTE_COMBO_RAINBOW_STAGE ? '?' : '+1';
+        const sprayCount =
+          combo >= VOTE_COMBO_RAINBOW_STAGE
+            ? Math.min(12, 3 + Math.floor((combo - VOTE_COMBO_RAINBOW_STAGE) / 18))
+            : Math.min(5, 1 + Math.floor((combo - 11) / 20));
+        for (let i = 0; i < sprayCount; i += 1) {
+          const spread = Math.min(140, 36 + combo * 0.55);
+          const rise = Math.min(110, 44 + combo * 0.42);
+          spawnText({
+            text: sprayText,
+            size: combo >= VOTE_COMBO_RAINBOW_STAGE ? 22 + Math.min(14, combo * 0.03) : 15 + Math.min(8, combo * 0.07),
+            dx: (Math.random() - 0.5) * spread,
+            dy: -(12 + Math.random() * rise),
+            duration: combo >= VOTE_COMBO_RAINBOW_STAGE ? Math.max(360, 760 - combo * 1.4) : Math.max(320, 560 - combo * 3),
+            delay: i * 18 + Math.random() * 55,
+            color: rainbowStage
+              ? rainbowColor(i + 1)
+              : heatColorForCombo(combo, Math.random() * 16 - 8),
+            pulseStrength: rainbowStage ? Math.min(1, 0.35 + rainbowPulseLv * 0.8) : 0,
+            z: 1,
+          });
+        }
+      }
 
       triggerWarningAlert();
       triggerHeavyHit();
@@ -2598,7 +2819,8 @@ function renderMenus(restaurants) {
       // 모바일에서 자동 포커스는 소프트키보드가 떠서 '클릭이 씹히는' 느낌이 자주 나서 기본은 포커스하지 않음.
       // (원하면 입력창을 직접 터치해서 포커스)
       // 데스크탑(정밀 포인터)일 때만 포커스
-      if (window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+      const isEdge = /\bEdg\//.test(navigator.userAgent);
+      if (window.matchMedia && window.matchMedia('(pointer: fine)').matches && !isEdge) {
         commentInput.focus();
       }
     };
