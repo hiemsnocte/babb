@@ -106,6 +106,21 @@ function variantsForNaverImageUrl(url) {
   return [url];
 }
 
+function isLikelyImageBytes(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return false;
+  const ascii = (start, end) => buf.subarray(start, end).toString('ascii');
+  const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  const isPng =
+    buf[0] === 0x89 &&
+    ascii(1, 4) === 'PNG' &&
+    buf[4] === 0x0d &&
+    buf[5] === 0x0a;
+  const isGif = ascii(0, 6) === 'GIF87a' || ascii(0, 6) === 'GIF89a';
+  const isWebp = ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP';
+  const isIsoImage = ascii(4, 8) === 'ftyp' && /avif|avis|heic|heix|mif1/.test(ascii(8, 24));
+  return isJpeg || isPng || isGif || isWebp || isIsoImage;
+}
+
 /**
  * 브라우저 fetch는 CORS로 막히는 경우가 많아, Node에서 Referer를 붙여 받습니다.
  */
@@ -130,15 +145,44 @@ async function downloadImageBytesFromNode(url) {
           },
         });
         if (!res.ok) continue;
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (!contentType.startsWith('image/')) continue;
         // eslint-disable-next-line no-await-in-loop
         const buf = Buffer.from(await res.arrayBuffer());
-        if (buf.length >= 500) return buf;
+        if (buf.length >= 500 && isLikelyImageBytes(buf)) return buf;
       } catch {
         /* 다음 Referer / URL */
       }
     }
   }
   return null;
+}
+
+async function downloadPreviousMenuSnapshot(restaurant, outputDir, fetchImpl = fetch) {
+  const previousUrl = `${rawGithubFileUrl(restaurant.imageFileName)}?preserve=${Date.now()}`;
+  const response = await fetchImpl(previousUrl, {
+    redirect: 'follow',
+    headers: {
+      'User-Agent': CHROME_UA,
+      Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+      'Cache-Control': 'no-cache',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`기존 메뉴 이미지 HTTP ${response.status}`);
+  }
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  if (!contentType.startsWith('image/')) {
+    throw new Error(`기존 메뉴 응답이 이미지가 아닙니다: ${contentType || 'unknown'}`);
+  }
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length < 500 || !isLikelyImageBytes(bytes)) {
+    throw new Error(`기존 메뉴 이미지 형식 검증 실패: ${bytes.length} bytes`);
+  }
+
+  const previousPath = path.join(outputDir, `.previous-${restaurant.imageFileName}`);
+  await fs.writeFile(previousPath, bytes);
+  return { ...restaurant, localPath: previousPath, stale: true };
 }
 
 async function tryFetchLargestVisibleImageAcrossFrames(page, outPath) {
@@ -160,8 +204,8 @@ async function tryFetchLargestVisibleImageAcrossFrames(page, outPath) {
           return r.width > 10 && r.height > 10;
         }
 
-        let best = null;
-        let bestArea = 0;
+        const hasZoomControls = !!document.querySelector('div.btn_zoom');
+        const found = [];
         for (const img of document.querySelectorAll('img')) {
           if (!(img instanceof HTMLImageElement)) continue;
           if (!isVisible(img)) continue;
@@ -170,14 +214,24 @@ async function tryFetchLargestVisibleImageAcrossFrames(page, outPath) {
           if (!/^https?:\/\//i.test(url) && !url.startsWith('blob:')) continue;
           const r = img.getBoundingClientRect();
           const area = r.width * r.height;
-          if (area > bestArea) {
-            bestArea = area;
-            best = { url, area: Math.round(area) };
-          }
+          const inViewer = !!img.closest(
+            '[role="dialog"], [class*="viewer"], [class*="Viewer"], [class*="zoom"], [class*="Zoom"]',
+          );
+          found.push({
+            url,
+            area: Math.round(area),
+            naturalArea: (img.naturalWidth || 0) * (img.naturalHeight || 0),
+            inViewer,
+            hasZoomControls,
+          });
         }
-        return best;
+        return found;
       });
-      if (pick && pick.url) candidates.push({ frame: f, url: pick.url, area: pick.area });
+      if (Array.isArray(pick)) {
+        for (const candidate of pick) {
+          if (candidate?.url) candidates.push({ frame: f, ...candidate });
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -188,7 +242,14 @@ async function tryFetchLargestVisibleImageAcrossFrames(page, outPath) {
     return false;
   }
 
-  candidates.sort((a, b) => b.area - a.area);
+  candidates.sort((a, b) => {
+    const priority = (candidate) =>
+      (candidate.hasZoomControls ? 1_000_000_000 : 0) +
+      (candidate.inViewer ? 100_000_000 : 0) +
+      candidate.area +
+      Math.min(candidate.naturalArea || 0, 10_000_000) / 100;
+    return priority(b) - priority(a);
+  });
   const best = candidates[0];
   if (best.area < MIN_IMAGE_AREA_FOR_URL_DOWNLOAD) {
     console.log(
@@ -210,7 +271,10 @@ async function tryFetchLargestVisibleImageAcrossFrames(page, outPath) {
           const ab = await res.arrayBuffer();
           return Array.from(new Uint8Array(ab));
         }, imageUrl);
-        if (byteList && byteList.length >= 500) bytes = Buffer.from(byteList);
+        if (byteList && byteList.length >= 500) {
+          const candidateBytes = Buffer.from(byteList);
+          if (isLikelyImageBytes(candidateBytes)) bytes = candidateBytes;
+        }
       } catch (e) {
         console.warn('[봄봄] blob URL fetch(프레임 내) 실패:', String(e?.message || e));
       }
@@ -234,15 +298,152 @@ async function tryFetchLargestVisibleImageAcrossFrames(page, outPath) {
   }
 }
 
+function naverMenuDateTokens(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  }).formatToParts(now);
+  const value = (type) => Number(parts.find((part) => part.type === type)?.value || 0);
+  const year = value('year');
+  const month = value('month');
+  const day = value('day');
+  const mm = String(month).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  return [
+    `${month}월 ${day}일`,
+    `${month}월${day}일`,
+    `${month}.${day}`,
+    `${month}/${day}`,
+    `${mm}.${dd}`,
+    `${mm}/${dd}`,
+    `${year}-${mm}-${dd}`,
+    `${year}.${mm}.${dd}`,
+  ];
+}
+
+function scoreNaverMenuCandidate(candidate, dateTokens = naverMenuDateTokens()) {
+  const reasons = [];
+  let score = 0;
+  const text = `${candidate.alt || ''} ${candidate.text || ''} ${
+    candidate.ariaLabel || ''
+  }`.replace(/\s+/g, ' ');
+  const src = String(candidate.src || '');
+  const searchable = text.toLowerCase();
+  const natural = candidate.natural || [0, 0];
+  const rect = candidate.rect || [0, 0];
+  const [nw, nh] = natural;
+  const [rw, rh] = rect;
+  const hasMenuWord = /(오늘의\s*)?메뉴|식단|특식|중식|금일\s*메뉴/.test(searchable);
+  const matchedDate = dateTokens.find((token) => searchable.includes(token.toLowerCase()));
+  const knownSize = [
+    [240, 300],
+    [339, 226],
+  ].some(
+    ([w, h]) =>
+      (Math.abs(nw - w) <= 4 && Math.abs(nh - h) <= 4) ||
+      (Math.abs(rw - w) <= 4 && Math.abs(rh - h) <= 4),
+  );
+
+  if (/captcha|캡차|보안\s*확인/.test(`${searchable} ${src.toLowerCase()}`)) {
+    return { score: -1000, reasons: ['captcha'] };
+  }
+  if (!/^https?:\/\//i.test(src)) {
+    return { score: -900, reasons: ['non-http-image'] };
+  }
+
+  if (hasMenuWord) {
+    score += 90;
+    reasons.push('menu-text');
+  }
+  if (matchedDate) {
+    score += 85;
+    reasons.push(`today:${matchedDate}`);
+  }
+  if (hasMenuWord && matchedDate) {
+    score += 45;
+    reasons.push('menu-and-today');
+  }
+  if (knownSize) {
+    score += 65;
+    reasons.push('known-size');
+  }
+  if (candidate.inPlaceThumb) {
+    score += 12;
+    reasons.push('place-thumb');
+  }
+  if (/ldb-phinf\.pstatic\.net/i.test(src)) {
+    score += 12;
+    reasons.push('business-image');
+  }
+  if (/pup-review|blogfiles|clip-service|myplace-phinf/i.test(src)) {
+    score -= hasMenuWord ? 15 : 50;
+    reasons.push('visitor-image');
+  }
+  if (nw >= 200 && nh >= 200 && nh / Math.max(nw, 1) >= 1.15) {
+    score += 12;
+    reasons.push('portrait');
+  }
+  if (rw * rh >= 120 * 120) {
+    score += 5;
+    reasons.push('large-enough');
+  }
+  if (!candidate.clickable) {
+    score -= 25;
+    reasons.push('not-clickable');
+  }
+
+  return { score, reasons };
+}
+
+async function naverBlockReason(page) {
+  for (const frame of page.frames()) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const blocked = await frame.evaluate(() => {
+        const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 5000);
+        const hasCaptcha = !!document.querySelector(
+          'img.captcha_img, img[alt*="캡차"], input[placeholder*="정답"]',
+        );
+        const hasSecurityText =
+          bodyText.includes('보안 확인을 완료해 주세요') ||
+          bodyText.includes('스팸을 방지하는 데 도움이 됩니다');
+        if (hasCaptcha || hasSecurityText) {
+          return hasCaptcha ? 'captcha' : 'security-check';
+        }
+        return null;
+      });
+      if (blocked) return blocked;
+    } catch {
+      /* 다른 origin으로 전환 중인 프레임은 다음 프레임에서 확인 */
+    }
+  }
+  return null;
+}
+
+async function throwIfNaverBlocked(page, stage) {
+  const reason = await naverBlockReason(page);
+  if (!reason) return;
+  throw new Error(
+    `[봄봄] 네이버 보안 확인(CAPTCHA/요청 제한) 감지: ${stage} (${reason}). ` +
+      '메뉴 선택 규칙으로 해결할 수 없는 상태이므로 다음 예약 실행에서 재시도합니다.',
+  );
+}
+
 async function captureNaverMapNews(page, url, imageFileName) {
+  const debugCapture = process.env.CAPTURE_DEBUG === '1';
   await page.goto(url, { waitUntil: 'load' });
+  await new Promise((r) => setTimeout(r, 1500));
+  await throwIfNaverBlocked(page, '장소 페이지 진입');
 
   // 네이버 지도 place 상세는 보통 iframe#entryIframe 안에서 렌더링됩니다.
   const entryIframe = await page.waitForSelector('iframe#entryIframe', {
-    timeout: 60000,
+    timeout: 30000,
   });
   const frame = await entryIframe.contentFrame();
   if (!frame) throw new Error('네이버 지도 entryIframe 프레임을 얻지 못했습니다.');
+  await throwIfNaverBlocked(page, '장소 상세 로드');
 
   // "소식(News)" 탭 클릭.
   // CI에서 언어/렌더링이 달라도 동작하도록 텍스트 + href/feed 패턴을 함께 사용합니다.
@@ -276,44 +477,23 @@ async function captureNaverMapNews(page, url, imageFileName) {
       }
       return false;
     },
-    { timeout: 60000 },
+    { timeout: 30000 },
   );
   const clickedNewsValue = await clickedNews.jsonValue();
   if (!clickedNewsValue) throw new Error('소식 탭 요소를 찾지 못했습니다.');
 
-  // 화면 전환 대기 (요청사항: 10초 정도)
-  await new Promise((r) => setTimeout(r, 10000));
+  // 화면 전환 및 지연 로딩 대기
+  await new Promise((r) => setTimeout(r, 8000));
+  await throwIfNaverBlocked(page, '소식 탭 로드');
 
   /**
-   * 네이버가 클래스를 자주 바꿔서, 고정 클래스보다
-   * 1) .place_thumb 안 img(썸네일 — ::after는 DOM에 없어 부모/이미지로 클릭; 규격은 240×300·339×226 등 허용)
-   * 2) 텍스트 "메뉴" (소식 피드 쪽; 상단과 겹치면 잘못 누를 수 있어 2순위)
-   * 3) 예전 구조(Hqj1R/zmCWt) 폴백
-   * 순으로 시도합니다.
+   * 이미지의 고정 px 크기만 보던 예전 규칙 대신, 현재 날짜·메뉴 문구·업체 이미지 여부·
+   * 세로형 비율·기존 알려진 규격을 함께 점수화합니다. 네이버가 썸네일을 정사각형으로
+   * 리사이즈해도 주변 카드에 날짜/메뉴 문구가 있으면 선택할 수 있습니다.
    */
   async function tryClickMenuPhotoButton(fr) {
-    // 1) .place_thumb — ::after는 선택 불가.
-    //    소식 피드에 이미지가 많아도, 알려진 메뉴 썸네일 규격에 가까운 img를 먼저 집습니다.
-    const thumbResult = await fr.evaluate(() => {
-      // 네이버/업체 UI 변경 시 규격이 바뀔 수 있어 복수 허용 (자연/표시 크기 모두 검사)
-      const MENU_THUMB_TARGETS = [
-        { w: 240, h: 300 },
-        { w: 339, h: 226 },
-      ];
-      const TOL = 3; // px 오차 허용
-
-      function approx(n, t) {
-        return Math.abs(n - t) <= TOL;
-      }
-
-      function sizeMatchesMenuThumb(nw, nh, rw, rh) {
-        return MENU_THUMB_TARGETS.some(
-          ({ w, h }) =>
-            (nw && nh && approx(nw, w) && approx(nh, h)) ||
-            (approx(rw, w) && approx(rh, h)),
-        );
-      }
-
+    const dateTokens = naverMenuDateTokens();
+    const imageCandidates = await fr.evaluate((todayTokens) => {
       function isVisible(el) {
         if (!(el instanceof Element)) return false;
         const style = window.getComputedStyle(el);
@@ -323,94 +503,98 @@ async function captureNaverMapNews(page, url, imageFileName) {
         return r.width > 10 && r.height > 10;
       }
 
-      const roots = Array.from(
-        document.querySelectorAll('.place_thumb, [class*="place_thumb"]'),
-      );
+      document
+        .querySelectorAll('[data-babb-menu-candidate]')
+        .forEach((el) => el.removeAttribute('data-babb-menu-candidate'));
 
-      // 1-a) place_thumb 내부 img 중 규격 매칭 우선
-      for (const root of roots) {
-        const imgs = Array.from(root.querySelectorAll('img'));
-        for (const img of imgs) {
-          if (!(img instanceof HTMLImageElement)) continue;
-          if (!isVisible(img)) continue;
-          const src = (img.getAttribute('src') || '').trim();
-          if (!src || src.startsWith('data:')) continue;
-
-          // 자연 크기 or 표시 크기(둘 다 검사)
-          const nw = img.naturalWidth || 0;
-          const nh = img.naturalHeight || 0;
+      return Array.from(document.querySelectorAll('img'))
+        .filter((img) => img instanceof HTMLImageElement && isVisible(img))
+        .map((img, index) => {
+          const src = (img.currentSrc || img.getAttribute('src') || '').trim();
           const rect = img.getBoundingClientRect();
-          const rw = Math.round(rect.width);
-          const rh = Math.round(rect.height);
-
-          const sizeOk = sizeMatchesMenuThumb(nw, nh, rw, rh);
-          if (!sizeOk) continue;
-
-          const clickable =
-            root.closest('a, button, [role="button"]') ||
-            (root instanceof HTMLElement ? root : null) ||
-            img;
-          if (clickable instanceof HTMLElement) {
-            clickable.click();
-            return {
-              ok: true,
-              reason: 'place_thumb:size',
-              srcPreview: src.slice(0, 200),
-              size: { natural: [nw, nh], rect: [rw, rh] },
-            };
+          const clickable = img.closest('a, button, [role="button"], [tabindex="0"]');
+          let contextText = '';
+          let cursor = img.parentElement;
+          for (let depth = 0; cursor && depth < 8; depth += 1, cursor = cursor.parentElement) {
+            const candidateText = (cursor.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!candidateText || candidateText.length > 900) continue;
+            contextText = candidateText;
+            if (
+              /메뉴|식단|특식|중식/.test(candidateText) ||
+              todayTokens.some((token) => candidateText.includes(token))
+            )
+              break;
           }
-        }
-      }
 
-      // 1-b) place_thumb에서 못 찾으면, 전체 img 중 규격 매칭 (피드 외부까지 넓힘)
-      const allImgs = Array.from(document.querySelectorAll('img'));
-      for (const img of allImgs) {
-        if (!(img instanceof HTMLImageElement)) continue;
-        if (!isVisible(img)) continue;
-        const src = (img.getAttribute('src') || '').trim();
-        if (!src || src.startsWith('data:')) continue;
-        const nw = img.naturalWidth || 0;
-        const nh = img.naturalHeight || 0;
-        const rect = img.getBoundingClientRect();
-        const rw = Math.round(rect.width);
-        const rh = Math.round(rect.height);
-        const sizeOk = sizeMatchesMenuThumb(nw, nh, rw, rh);
-        if (!sizeOk) continue;
-
-        const clickable =
-          img.closest('.place_thumb, [class*="place_thumb"]')?.closest('a, button, [role="button"]') ||
-          img.closest('a, button, [role="button"]') ||
-          (img instanceof HTMLElement ? img : null);
-        if (clickable instanceof HTMLElement) {
-          clickable.click();
+          const id = String(index);
+          img.setAttribute('data-babb-menu-candidate', id);
           return {
-            ok: true,
-            reason: 'img:size',
-            srcPreview: src.slice(0, 200),
-            size: { natural: [nw, nh], rect: [rw, rh] },
+            id,
+            alt: (img.getAttribute('alt') || '').slice(0, 160),
+            ariaLabel: (
+              img.getAttribute('aria-label') ||
+              clickable?.getAttribute('aria-label') ||
+              ''
+            ).slice(0, 160),
+            natural: [img.naturalWidth || 0, img.naturalHeight || 0],
+            rect: [Math.round(rect.width), Math.round(rect.height)],
+            src,
+            clickable: !!clickable,
+            inPlaceThumb: !!img.closest('.place_thumb, [class*="place_thumb"]'),
+            text: contextText.slice(0, 900),
           };
-        }
-      }
+        });
+    }, dateTokens);
 
-      return { ok: false, reason: 'thumb-not-found' };
-    });
-    if (thumbResult.ok) {
+    const rankedCandidates = imageCandidates
+      .map((candidate) => ({
+        ...candidate,
+        ...scoreNaverMenuCandidate(candidate, dateTokens),
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    if (debugCapture) {
       console.log(
-        '[봄봄] 썸네일 클릭:',
-        thumbResult.reason,
-        thumbResult.size ? JSON.stringify(thumbResult.size) : '',
-        thumbResult.srcPreview,
+        '[봄봄] 메뉴 후보 점수:',
+        JSON.stringify(
+          rankedCandidates.slice(0, 10).map((candidate) => ({
+            score: candidate.score,
+            reasons: candidate.reasons,
+            natural: candidate.natural,
+            rect: candidate.rect,
+            text: candidate.text.slice(0, 160),
+            src: candidate.src.slice(0, 160),
+          })),
+        ),
       );
-      return {
-        ok: true,
-        reason: thumbResult.reason || 'thumb',
-        strictPass: true,
-      };
     }
 
-    // 2) 텍스트 "메뉴"는 전역 탐색 시 상단 탭을 잘못 누를 수 있어
-    //    피드 카드/썸네일 근처 요소로 범위를 제한합니다.
-    const menuTextResult = await fr.evaluate(() => {
+    const best = rankedCandidates[0];
+    if (best && best.score >= 70) {
+      const clicked = await fr.evaluate((candidateId) => {
+        const img = document.querySelector(
+          `img[data-babb-menu-candidate="${candidateId}"]`,
+        );
+        if (!(img instanceof HTMLImageElement)) return false;
+        const target =
+          img.closest('a, button, [role="button"], [tabindex="0"]') || img;
+        if (!(target instanceof HTMLElement)) return false;
+        target.click();
+        return true;
+      }, best.id);
+      if (clicked) {
+        console.log(
+          `[봄봄] 점수 기반 메뉴 이미지 클릭: score=${best.score}, reasons=${best.reasons.join(
+            ',',
+          )}, natural=${best.natural.join('x')}, rect=${best.rect.join('x')}`,
+        );
+        return { ok: true, reason: `scored-image:${best.reasons.join(',')}` };
+      }
+    }
+
+    // 이미지 주변 텍스트를 DOM 구조상 묶지 못한 경우, 메뉴/오늘 날짜가 있는 카드 안의
+    // 첫 이미지를 마지막 의미 기반 폴백으로 사용합니다. 상단 탭은 카드가 아니므로 제외됩니다.
+    const semanticCardResult = await fr.evaluate((todayTokens) => {
       function isVisible(el) {
         if (!(el instanceof Element)) return false;
         const style = window.getComputedStyle(el);
@@ -420,103 +604,45 @@ async function captureNaverMapNews(page, url, imageFileName) {
         return r.width > 6 && r.height > 6;
       }
 
-      const candidates = Array.from(
-        document.querySelectorAll('a, button, [role="button"], div[tabindex="0"]'),
+      const cards = Array.from(
+        document.querySelectorAll(
+          'article, li, [class*="feed"], [class*="news"], [class*="post"], [class*="card"]',
+        ),
       );
-      for (const el of candidates) {
-        if (!(el instanceof HTMLElement)) continue;
-        if (!isVisible(el)) continue;
-        if (el.closest('[role="tablist"]')) continue; // 상단 탭 영역 제외
-
-        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!text.includes('메뉴')) continue;
-
-        const nearThumb =
-          !!el.closest('.place_thumb, [class*="place_thumb"], [class*="thumb"]') ||
-          !!el.querySelector('img') ||
-          !!el.closest('article, li, [class*="feed"], [class*="news"], [class*="post"]');
-        if (!nearThumb) continue;
-
-        el.click();
-        return { ok: true };
+      for (const card of cards) {
+        if (!(card instanceof HTMLElement) || !isVisible(card)) continue;
+        const text = (card.textContent || '').replace(/\s+/g, ' ').trim();
+        const hasMenu = /메뉴|식단|특식|중식/.test(text);
+        const hasToday = todayTokens.some((token) => text.includes(token));
+        if (!hasMenu && !hasToday) continue;
+        const img = Array.from(card.querySelectorAll('img')).find(isVisible);
+        if (!(img instanceof HTMLImageElement)) continue;
+        const target =
+          img.closest('a, button, [role="button"], [tabindex="0"]') || img;
+        if (target instanceof HTMLElement) {
+          target.click();
+          return { ok: true, hasMenu, hasToday };
+        }
       }
       return { ok: false };
-    });
-    if (menuTextResult.ok) {
-      console.log('[봄봄] 제한된 범위의 텍스트 "메뉴" 요소 클릭');
-      return {
-        ok: true,
-        reason: 'menu-text-near-thumb',
-        strictPass: false,
-      };
+    }, dateTokens);
+    if (semanticCardResult.ok) {
+      const reason = semanticCardResult.hasToday ? 'semantic-card:today' : 'semantic-card:menu';
+      console.log(`[봄봄] 의미 기반 카드 이미지 클릭: ${reason}`);
+      return { ok: true, reason };
     }
 
-    // 3) 예전 클래스 기반 폴백
-    const trySelectors = [
-      'div.Hqj1R div.zmCWt',
-      'div.Hqj1R button',
-      'div.Hqj1R [role="button"]',
-      'div[class*="Hqj1R"] div[class*="zmCWt"]',
-      '[class*="zmCWt"]',
-    ];
-    for (const sel of trySelectors) {
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        await fr.waitForSelector(sel, { timeout: 8000 });
-        // eslint-disable-next-line no-await-in-loop
-        const el = await fr.$(sel);
-        if (el) {
-          // eslint-disable-next-line no-await-in-loop
-          await el.click();
-          console.log('[봄봄] 레거시 셀렉터 클릭:', sel);
-          return {
-            ok: true,
-            reason: `legacy-selector:${sel}`,
-            strictPass: false,
-          };
-        }
-      } catch {
-        /* 다음 */
-      }
-    }
-
-    const clicked = await fr.evaluate(() => {
-      const root =
-        document.querySelector('div.Hqj1R') ||
-        document.querySelector('[class*="Hqj1R"]') ||
-        document.body;
-      const candidates = root.querySelectorAll(
-        'button, [role="button"], a, img, div[tabindex="0"]',
-      );
-      for (const c of candidates) {
-        const t = (c.textContent || '').replace(/\s+/g, ' ').trim();
-        const alt = (c.getAttribute && c.getAttribute('alt')) || '';
-        if (t.includes('메뉴') || alt.includes('메뉴')) {
-          if (typeof c.click === 'function') c.click();
-          return true;
-        }
-      }
-      const firstInHqj = root.querySelector('img, [class*="zmCWt"]');
-      if (firstInHqj && typeof firstInHqj.click === 'function') {
-        firstInHqj.click();
-        return true;
-      }
-      return false;
-    });
-    if (clicked) {
-      return { ok: true, reason: 'fallback-generic', strictPass: false };
-    }
-    return { ok: false, reason: 'all-fallbacks-failed' };
+    return {
+      ok: false,
+      reason: best
+        ? `고신뢰 후보 없음(bestScore=${best.score}, reasons=${best.reasons.join(',')})`
+        : '표시된 이미지 후보 없음',
+    };
   }
 
   const menuClick = await tryClickMenuPhotoButton(frame);
   if (!menuClick.ok) {
     throw new Error(`[봄봄] 메뉴 사진 버튼 탐색 실패: ${menuClick.reason}`);
-  }
-  if (!menuClick.strictPass) {
-    throw new Error(
-      `[봄봄] 엄격 모드 실패(규격 매칭 썸네일 선택 아님): ${menuClick.reason}`,
-    );
   }
 
   // 줌 UI는 클릭 후 다른 레이어/프레임으로 이동할 수 있어, 전체 프레임에서 다시 찾습니다.
@@ -935,15 +1061,71 @@ function todayDateKorea() {
   }).format(new Date());
 }
 
-(async () => {
-  const firebaseConfig = loadFirebaseConfig();
-  const app = initializeApp(firebaseConfig);
-  const db = getFirestore(app);
+async function captureRestaurantWithRetries(page, restaurant, localPath) {
+  const configuredAttempts = Number(process.env.NAVER_CAPTURE_ATTEMPTS || 2);
+  const maxAttempts =
+    restaurant.type === 'naverMap'
+      ? Math.min(3, Math.max(1, Number.isFinite(configuredAttempts) ? configuredAttempts : 2))
+      : 1;
 
-  const token = loadGithubToken();
-  const remoteUrl = githubRemoteUrl(token);
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      if (restaurant.type === 'kakao') {
+        await captureKakaoProfileMenu(page, restaurant.profileUrl, localPath);
+      } else if (restaurant.type === 'naverMap') {
+        await captureNaverMapNews(page, restaurant.profileUrl, localPath);
+      } else {
+        throw new Error(`지원하지 않는 type 입니다: ${restaurant.type}`);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error);
+      const nonRetriable = /CAPTCHA|보안 확인|ERR_NETWORK_ACCESS_DENIED/.test(message);
+      if (nonRetriable || attempt >= maxAttempts) break;
+      console.warn(
+        `[${restaurant.name}] 캡처 재시도 ${attempt + 1}/${maxAttempts}: ${message}`,
+      );
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+async function main() {
+  const dryRun = process.env.CAPTURE_DRY_RUN === '1';
+  const captureOnly = (process.env.CAPTURE_ONLY || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (!dryRun && captureOnly.length > 0) {
+    throw new Error('CAPTURE_ONLY는 원격 메뉴를 일부만 덮어쓰지 않도록 dry-run에서만 허용됩니다.');
+  }
+  const selectedRestaurants =
+    captureOnly.length === 0
+      ? RESTAURANTS
+      : RESTAURANTS.filter((restaurant) => captureOnly.includes(restaurant.id));
+  if (selectedRestaurants.length === 0) {
+    throw new Error(`CAPTURE_ONLY에 해당하는 식당이 없습니다: ${captureOnly.join(', ')}`);
+  }
+
+  let db = null;
+  let remoteUrl = null;
+  if (!dryRun) {
+    const firebaseConfig = loadFirebaseConfig();
+    const app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+
+    const token = loadGithubToken();
+    remoteUrl = githubRemoteUrl(token);
+  }
+
   const cacheRoot = path.join(process.cwd(), '.menu-github-cache');
   const repoPath = path.join(cacheRoot, `${GITHUB_OWNER}_${GITHUB_REPO}`);
+  const outputDir = path.resolve(process.cwd(), process.env.CAPTURE_OUTPUT_DIR || '.');
+  await fs.mkdir(outputDir, { recursive: true });
 
   const browser = await puppeteer.launch({
     headless: true,
@@ -967,20 +1149,28 @@ function todayDateKorea() {
 
   const captured = [];
   const captureErrors = [];
-  for (const r of RESTAURANTS) {
-    const localPath = path.resolve(process.cwd(), r.imageFileName);
+  for (const r of selectedRestaurants) {
+    const localPath = path.join(outputDir, r.imageFileName);
     try {
-      if (r.type === 'kakao') {
-        await captureKakaoProfileMenu(page, r.profileUrl, r.imageFileName);
-      } else if (r.type === 'naverMap') {
-        await captureNaverMapNews(page, r.profileUrl, r.imageFileName);
-      } else {
-        throw new Error(`지원하지 않는 type 입니다: ${r.type}`);
-      }
+      await captureRestaurantWithRetries(page, r, localPath);
       captured.push({ ...r, localPath });
     } catch (e) {
       captureErrors.push({ id: r.id, name: r.name, error: String(e?.message ?? e) });
       console.error(`[캡처 실패] ${r.name}: ${String(e?.message ?? e)}`);
+      if (dryRun) {
+        const parsed = path.parse(localPath);
+        const errorScreenshotPath = path.join(parsed.dir, `${parsed.name}.error.png`);
+        try {
+          await page.screenshot({ path: errorScreenshotPath, fullPage: true });
+          console.log(`[dry-run] 실패 화면 저장: ${errorScreenshotPath}`);
+        } catch (screenshotError) {
+          console.warn(
+            `[dry-run] 실패 화면 저장 실패: ${String(
+              screenshotError?.message || screenshotError,
+            )}`,
+          );
+        }
+      }
     }
   }
 
@@ -991,22 +1181,64 @@ function todayDateKorea() {
     throw new Error('모든 식당 캡처에 실패했습니다.');
   }
 
+  const publishedMenus = captured.map((entry) => ({ ...entry, stale: false }));
+  if (!dryRun && captureErrors.length > 0) {
+    for (const captureError of captureErrors) {
+      const restaurant = selectedRestaurants.find((item) => item.id === captureError.id);
+      if (!restaurant) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const previous = await downloadPreviousMenuSnapshot(restaurant, outputDir);
+        publishedMenus.push(previous);
+        console.warn(
+          `[${restaurant.name}] 새 캡처 실패 → 직전 정상 메뉴 이미지를 유지합니다: ${previous.localPath}`,
+        );
+      } catch (preserveError) {
+        throw new Error(
+          `[${restaurant.name}] 새 캡처와 직전 이미지 보존이 모두 실패하여 원격 갱신을 중단합니다. ` +
+            `캡처 오류: ${captureError.error}; 보존 오류: ${String(
+              preserveError?.message || preserveError,
+            )}`,
+        );
+      }
+    }
+  }
+  const menuOrder = new Map(selectedRestaurants.map((restaurant, index) => [restaurant.id, index]));
+  publishedMenus.sort((a, b) => (menuOrder.get(a.id) ?? 999) - (menuOrder.get(b.id) ?? 999));
+
+  if (dryRun) {
+    console.log(
+      `[dry-run] 외부 갱신 없이 로컬 캡처만 완료했습니다: ${captured
+        .map((c) => c.localPath)
+        .join(', ')}`,
+    );
+    if (captureErrors.length > 0) {
+      throw new Error(
+        `[dry-run] 일부 캡처 실패: ${captureErrors
+          .map((e) => `${e.name}: ${e.error}`)
+          .join(' | ')}`,
+      );
+    }
+    return;
+  }
+
   await ensureClone(remoteUrl, repoPath);
   await gitForcePushSnapshotWithMenus({
     repoPath,
     remoteUrl,
     branch: GITHUB_MENUS_BRANCH,
-    menuFiles: captured.map((c) => ({
+    menuFiles: publishedMenus.map((c) => ({
       localPath: c.localPath,
       destFileName: c.imageFileName,
     })),
   });
 
   const date = todayDateKorea();
-  const restaurants = captured.map((c) => ({
+  const restaurants = publishedMenus.map((c) => ({
     id: c.id,
     name: c.name,
     imageUrl: withCacheBust(rawGithubFileUrl(c.imageFileName)),
+    stale: !!c.stale,
   }));
   await setDoc(
     doc(db, 'menus', FIRESTORE_MENU_DOC_ID),
@@ -1020,7 +1252,18 @@ function todayDateKorea() {
   );
   console.log(`Firestore menus/${FIRESTORE_MENU_DOC_ID} 문서를 갱신했습니다. (date: ${date})`);
   console.log(`restaurants: ${restaurants.map((r) => r.imageUrl).join(', ')}`);
-})().catch((err) => {
-  logErrorWithoutSecrets(err, process.env.GITHUB_TOKEN);
-  process.exit(1);
-});
+}
+
+if (require.main === module) {
+  main().catch((err) => {
+    logErrorWithoutSecrets(err, process.env.GITHUB_TOKEN);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  downloadPreviousMenuSnapshot,
+  isLikelyImageBytes,
+  naverMenuDateTokens,
+  scoreNaverMenuCandidate,
+};

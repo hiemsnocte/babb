@@ -1,4 +1,5 @@
 .env
 node_modules/
 .menu-github-cache/
+.capture-test/
 menu_*.png
