@@ -1,0 +1,41 @@
+[
+  {
+    "id": "beoksan",
+    "name": "벽산더이룸",
+    "source": { "type": "capture" },
+    "priceWon": 8000,
+    "links": [
+      { "label": "카카오맵", "url": "https://place.map.kakao.com/2142931780" }
+    ]
+  },
+  {
+    "id": "theeats",
+    "name": "더이츠푸드",
+    "source": { "type": "capture" },
+    "priceWon": 7500,
+    "links": [
+      { "label": "카카오맵", "url": "https://place.map.kakao.com/2111901229" }
+    ]
+  },
+  {
+    "id": "bombom",
+    "name": "봄봄",
+    "source": { "type": "capture" },
+    "priceWon": 9000,
+    "closedDays": [0],
+    "links": [
+      { "label": "네이버", "url": "https://map.naver.com/p/search/%EA%B5%AC%EB%94%94%20%EB%B4%84%EB%B4%84/place/2096511528?placePath=?abtExp=NEW-PLACE-SEARCH%3A1&bk_query=%EA%B5%AC%EB%94%94%20%EB%B4%84%EB%B4%84&entry=pll&from=nx&fromNxList=true&searchType=place&c=15.00,0,0,0,dh" },
+      { "label": "인스타그램", "url": "https://www.instagram.com/bombom_guro/" }
+    ]
+  },
+  {
+    "id": "beerpan",
+    "name": "생앤맥주판",
+    "source": { "type": "static", "path": "./assets/menus/beerpan.png" },
+    "priceWon": 8000,
+    "links": [
+      { "label": "인스타그램", "url": "https://www.instagram.com/beerpan__d0n/" },
+      { "label": "당근", "url": "https://www.daangn.com/kr/local-profile/%EC%83%9D%EC%95%A4%EB%A7%A5%EC%A3%BC%ED%8E%8D-fruq2j6aupbf/" }
+    ]
+  }
+]

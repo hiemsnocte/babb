@@ -1,4 +1,4 @@
-# 스케줄(capture): 한국시간 10:30·11:30, 21:30·22:00 (UTC cron 아래 참고)
+# 캡처 스케줄: 아래 UTC cron 기준 하루 14회. 캡처 후 정적 메뉴·날씨를 게시합니다.
 # [필수] GitHub Pages 최초 1회: 레포 Settings → Pages → Build and deployment
 #       → Source 를 "GitHub Actions" 로 선택 (안 하면 deploy job 이 404로 실패함)
 #
@@ -9,6 +9,10 @@ on:
     branches: [main]
     paths:
       - 'public/**'
+      - 'scripts/prepare-site.cjs'
+      - 'test/**'
+      - 'package.json'
+      - 'package-lock.json'
       - '.github/workflows/main.yml'
   schedule:
     # 메뉴 캡처 (UTC cron)
@@ -73,12 +77,34 @@ jobs:
           if-no-files-found: ignore
 
   deploy:
+    needs: capture
+    # A failed capture can still publish the last valid menu snapshot. Pushes skip capture.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install test dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: npm ci
+
+      - name: Test menu publishing
+        run: npm test
+
+      - name: Prepare static menus and shared weather
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+        run: node scripts/prepare-site.cjs
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6

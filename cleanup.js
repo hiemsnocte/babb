@@ -1,18 +1,8 @@
 require('dotenv').config();
 
 const { initializeApp } = require('firebase/app');
-const {
-  getFirestore,
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  limit,
-  query,
-  serverTimestamp,
-  setDoc,
-  writeBatch,
-} = require('firebase/firestore');
+const firestoreApi = require('firebase/firestore');
+const { getFirestore } = firestoreApi;
 
 function loadFirebaseConfig() {
   const keys = [
@@ -48,16 +38,23 @@ function todayDateKorea() {
   }).format(new Date());
 }
 
-async function deleteOldCommentDocs(colRef, dateStr, pageSize = 300) {
-  // Firestore Web SDK는 "where + orderBy + batch recursive delete"가 제한적이라
-  // 페이지네이션으로 읽은 뒤 date가 오늘이 아닌 문서만 삭제합니다.
+async function deleteOldCommentDocs(colRef, dateStr, pageSize = 300, api = firestoreApi) {
+  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 500) {
+    throw new Error('Comment cleanup page size must be between 1 and 500');
+  }
   let deleted = 0;
+  let cursor = null;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const snap = await getDocs(query(colRef, limit(pageSize)));
+    // Advance past every examined document, including today's retained messages.
+    // A snapshot cursor remains usable even when that document is deleted below.
+    const constraints = [api.orderBy(api.documentId()), api.limit(pageSize)];
+    if (cursor) constraints.push(api.startAfter(cursor));
+    const snap = await api.getDocs(api.query(colRef, ...constraints));
     if (snap.empty) return deleted;
+    cursor = snap.docs[snap.docs.length - 1];
 
-    const batch = writeBatch(colRef.firestore);
+    const batch = api.writeBatch(colRef.firestore);
     let toDelete = 0;
     snap.docs.forEach((d) => {
       const data = d.data() || {};
@@ -75,39 +72,37 @@ async function deleteOldCommentDocs(colRef, dateStr, pageSize = 300) {
   }
 }
 
-async function resetRestaurantDailyState(db, rid, dateStr) {
-  const restaurantDocRef = doc(db, 'menus', 'current', 'restaurants', rid);
-  // 날짜가 오늘이 아니면 이모지를 비웁니다. (오늘 데이터는 유지)
-  const restaurantSnap = await getDoc(restaurantDocRef);
-  const restaurantData = restaurantSnap.exists() ? restaurantSnap.data() : null;
-  const restaurantDate = typeof restaurantData?.date === 'string' ? restaurantData.date : '';
-  if (!restaurantData || restaurantDate !== dateStr) {
-    await setDoc(
-      restaurantDocRef,
-      {
-        date: dateStr,
-        emojiCounts: {},
-        liveEmojiCounts: {},
-        sacrificedEmojiCounts: {},
-        destroyedEmojiCounts: {},
-        emojiCrownMerge: {},
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-  }
+async function resetRestaurantDailyState(db, rid, dateStr, api = firestoreApi) {
+  const restaurantDocRef = api.doc(db, 'menus', 'current', 'restaurants', rid);
+  // If a first vote arrives concurrently, Firestore retries this date check using
+  // the updated document rather than overwriting today's newly recorded vote.
+  await api.runTransaction(db, async (transaction) => {
+    const restaurantSnap = await transaction.get(restaurantDocRef);
+    const restaurantData = restaurantSnap.exists() ? restaurantSnap.data() : null;
+    if (restaurantData?.date === dateStr) return;
+    transaction.set(restaurantDocRef, {
+      date: dateStr,
+      emojiCounts: {},
+      liveEmojiCounts: {},
+      sacrificedEmojiCounts: {},
+      destroyedEmojiCounts: {},
+      emojiCrownMerge: {},
+      updatedAt: api.serverTimestamp(),
+    }, { merge: true });
+  });
 
-  const commentsColRef = collection(db, 'menus', 'current', 'restaurants', rid, 'comments');
-  return deleteOldCommentDocs(commentsColRef, dateStr);
+  const commentsColRef = api.collection(db, 'menus', 'current', 'restaurants', rid, 'comments');
+  return deleteOldCommentDocs(commentsColRef, dateStr, 300, api);
 }
 
-(async () => {
+async function main() {
   const firebaseConfig = loadFirebaseConfig();
   const app = initializeApp(firebaseConfig);
   const db = getFirestore(app);
 
   const dateStr = todayDateKorea();
-  const restaurantIds = ['beoksan', 'theeats', 'bombom'];
+  const { validateCatalog } = require('./scripts/prepare-site.cjs');
+  const restaurantIds = validateCatalog(require('./public/restaurants.json')).map((restaurant) => restaurant.id);
   let deletedComments = 0;
 
   for (const rid of restaurantIds) {
@@ -116,8 +111,13 @@ async function resetRestaurantDailyState(db, rid, dateStr) {
   }
 
   console.log(`[cleanup] KST ${dateStr} 정리 완료 (삭제된 지난 날짜 comments: ${deletedComments})`);
-})().catch((err) => {
-  console.error(err?.stack || String(err));
-  process.exit(1);
-});
+}
 
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err?.stack || String(err));
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { deleteOldCommentDocs, resetRestaurantDailyState, todayDateKorea };

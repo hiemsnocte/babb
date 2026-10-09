@@ -18,12 +18,9 @@
         --text: #1a1a1a;
         --muted: #5c5c5c;
         --accent: #2d6a4f;
-        --container-max: 1060px;
-        --menu-columns: 2;
+        /* 레이아웃 컨테이너 폭(PC는 기존 유지, 큰 폰은 조금 더 넓게) */
+        --container-max: 520px;
       }
-      :root[data-columns='1'] { --container-max: 520px; --menu-columns: 1; }
-      :root[data-columns='2'] { --container-max: 1060px; --menu-columns: 2; }
-      :root[data-columns='3'] { --container-max: 1600px; --menu-columns: 3; }
       @media (prefers-color-scheme: dark) {
         :root {
           --bg: #121412;
@@ -50,8 +47,6 @@
         -webkit-user-select: none;
       }
       header {
-        width: 100%;
-        max-width: var(--container-max);
         text-align: center;
         margin-bottom: 1.25rem;
       }
@@ -74,62 +69,23 @@
         overflow: hidden;
         border: 1px solid rgba(0, 0, 0, 0.06);
       }
+      /* header-grid는 HTML에 inline max-width가 있어 !important로 덮어씁니다 */
       .header-grid {
-        width: 100%;
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-        align-items: start;
-        gap: 12px;
-      }
-      .header-actions {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        justify-self: start;
-      }
-      .view-switcher {
-        display: flex;
-        justify-self: end;
-        margin-top: 6px;
-        padding: 2px;
-        gap: 1px;
-        border: 1px solid rgba(127, 127, 127, 0.25);
-        border-radius: 7px;
-        background: rgba(127, 127, 127, 0.08);
-      }
-      .view-btn {
-        display: grid;
-        place-items: center;
-        width: 29px;
-        height: 28px;
-        padding: 4px;
-        border: 0;
-        border-radius: 4px;
-        background: transparent;
-        color: var(--muted);
-        cursor: pointer;
-      }
-      .view-btn svg { width: 19px; height: 18px; }
-      .view-btn:hover { background: rgba(127, 127, 127, 0.14); color: var(--text); }
-      .view-btn[aria-pressed='true'] { background: var(--card); color: var(--text); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.16); }
-      .view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-      .menu-card[data-restaurant='beoksan'] .img-wrap {
-        background: #fff;
+        max-width: var(--container-max) !important;
       }
       .img-wrap {
         position: relative;
         aspect-ratio: 4 / 3;
-        background: #111;
+        background: #e8ebe8;
       }
       .img-wrap img {
         position: absolute;
         inset: 0;
         width: 100%;
         height: 100%;
-        object-fit: fill;
+        object-fit: contain;
         display: block;
       }
-      .img-wrap img.menu-contain { object-fit: contain; }
       .state {
         position: absolute;
         inset: 0;
@@ -167,7 +123,7 @@
           margin: 0 !important;
           justify-self: center !important;
         }
-        .header-actions {
+        #compare-btn {
           grid-area: compare;
           justify-self: start !important;
           align-self: center !important;
@@ -235,64 +191,121 @@
         width: 100%;
         max-width: var(--container-max);
         display: grid;
-        grid-template-columns: repeat(var(--menu-columns), minmax(0, 1fr));
-        align-items: start;
         gap: 12px;
       }
 
-      @media (max-width: 900px) {
-        :root, :root[data-columns] { --container-max: 620px; --menu-columns: 1; }
-        .view-switcher { display: none; }
-      }
-      @media (max-width: 429px) {
-        :root, :root[data-columns] { --container-max: 520px; }
+      /* 큰 모바일(예: Ultra급)에서는 컨테이너 폭을 조금 더 넓혀 “좁게” 보이는 문제 완화 */
+      @media (min-width: 430px) and (max-width: 900px) {
+        :root {
+          --container-max: 620px;
+        }
       }
       .menu-title {
         margin: 0;
-        padding: 12px 16px;
-        background: #111;
-        color: #fff;
+        padding: 0.85rem 0 0.65rem;
+        display: grid;
+        gap: 8px;
       }
       .menu-title-top {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-        align-items: center;
-        column-gap: 8px;
-      }
-      .menu-heading {
-        grid-column: 2;
-        grid-row: 1;
         display: flex;
-        align-items: baseline;
         justify-content: center;
-        gap: 6px;
+        padding: 0 1rem;
       }
       .menu-title-name {
-        min-width: 0;
-        text-align: center;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 85%;
+        padding: 9px 14px;
+        border-radius: 12px;
+        background: rgba(0, 0, 0, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: #fff;
         font-size: 15px;
         font-weight: 750;
-        line-height: 1.4;
         letter-spacing: -0.02em;
+        text-transform: none;
+        box-shadow: 0 10px 22px rgba(0, 0, 0, 0.12);
       }
-      .menu-price { color: #ddd; font-size: 12px; white-space: nowrap; }
-      .menu-price[hidden] { display: none; }
-      .menu-closed-badge {
+      /* 리본 느낌(양쪽 꼬리) */
+      .menu-title-name::before,
+      .menu-title-name::after {
+        content: '';
         position: absolute;
-        top: 8px;
-        right: 8px;
-        z-index: 4;
-        padding: 5px 9px;
-        border-radius: 999px;
-        border: 1px solid #111;
-        background: #8b1e24;
-        color: #fff;
-        font-size: 11px;
-        line-height: 1.2;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+        top: 50%;
+        width: 18px;
+        height: 18px;
+        background: rgba(0, 0, 0, 0.92);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        transform: translateY(-50%) rotate(45deg);
+        box-shadow: 0 10px 22px rgba(0, 0, 0, 0.12);
       }
-      .menu-closed-badge[hidden] { display: none; }
+      .menu-title-name::before {
+        left: -8px;
+        border-right: none;
+        border-top: none;
+      }
+      .menu-title-name::after {
+        right: -8px;
+        border-left: none;
+        border-bottom: none;
+      }
 
+      .menu-title-mid {
+        position: relative;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        /* 폰트/이모지 렌더링 차이로 인한 흔들림 방지 */
+        height: 58px;
+      }
+      .menu-title-bottom {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 1rem;
+        min-height: 26px;
+      }
+      .grave-icon {
+        width: 58px;
+        height: 58px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 52px;
+        line-height: 1;
+        filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.2));
+        user-select: none;
+      }
+      .title-right {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 24px;
+        /* 오른쪽 영역 안에서 '타이틀 옆'부터 쌓이게 */
+        justify-content: center;
+        flex: 1;
+        flex-wrap: wrap;
+      }
+      .emoji-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.85);
+        border: 1px solid #c7a7ff;
+        color: #fff;
+        font-size: 13px;
+        line-height: 1;
+        user-select: none;
+      }
+      .emoji-pill .count {
+        color: #c7a7ff;
+        font-weight: 600;
+        font-size: 12px;
+      }
       .menu-actions[hidden] {
         display: none !important;
       }
@@ -934,7 +947,7 @@
         overflow: hidden;
         z-index: 2;
       }
-      .danmaku > .danmaku-line {
+      .danmaku span {
         position: absolute;
         left: 0;
         top: 0;
@@ -942,37 +955,15 @@
         font-weight: 700;
         font-size: 20px;
         text-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
-        /* 전광판 이동은 social.js에서 처리합니다. */
+        /* 이동은 script.js에서 transform + linear transition (횡단 거리·속도 일정) */
       }
       .menu-card {
-        container-type: inline-size;
         width: 100%;
-        background: #111;
-        border-radius: 10px;
+        background: var(--card);
+        border-radius: 12px;
         box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
         overflow: hidden;
-        border: 3px solid #111;
-      }
-      /* Compact cards also occur on desktop in three-column view. */
-      @container (max-width: 480px) {
-        .menu-title-top { grid-template-columns: minmax(0, 1fr); row-gap: 6px; }
-        .menu-heading { grid-column: 1; justify-self: center; }
-        .menu-title-top .restaurant-links { grid-column: 1; grid-row: 2; }
-      }
-      @container (max-width: 400px) {
-        .menu-viewonly-btn {
-          position: static;
-          width: 100%;
-          margin-bottom: 8px;
-          justify-content: center;
-          display: inline-flex;
-        }
-        .menu-actions { padding-top: 10px; }
-        .menu-title { padding: 12px 10px; }
-      }
-      @container (max-width: 340px) {
-        .emoji-row { gap: 4px; margin-bottom: 8px; }
-        .emoji-btn { padding: 5px; }
+        border: 1px solid rgba(0, 0, 0, 0.06);
       }
       .date-badge {
         display: inline-block;
@@ -984,14 +975,20 @@
         color: var(--accent);
       }
     </style>
-    <link rel="stylesheet" href="./social-compat.css" />
   </head>
   <body>
     <header>
-      <div class="header-grid">
-        <div class="header-actions">
-          <button id="compare-btn" type="button" class="header-btn">메뉴 비교</button>
-        </div>
+      <div
+        class="header-grid"
+        style="
+          width: 100%;
+          max-width: 520px;
+          display: grid;
+          grid-template-columns: 1fr auto 1fr;
+          align-items: start;
+        "
+      >
+        <button id="compare-btn" type="button" class="header-btn">메뉴 비교</button>
         <h1 style="margin: 0; text-align: center; justify-self: center">오늘의 메뉴🍴</h1>
         <div
           id="weather"
@@ -1009,17 +1006,6 @@
             <span id="weather-temp" style="font-weight: 600">—°C</span>
           </div>
           <div id="weather-time" class="sub" style="margin: 0">—</div>
-          <div class="view-switcher" role="group" aria-label="보기 방식">
-            <button type="button" class="view-btn" data-columns="1" aria-label="1열 보기" title="1열 보기" aria-pressed="false">
-              <svg viewBox="0 0 20 18" aria-hidden="true"><rect x="3" y="2" width="14" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" /></svg>
-            </button>
-            <button type="button" class="view-btn" data-columns="2" aria-label="2열 보기" title="2열 보기" aria-pressed="true">
-              <svg viewBox="0 0 20 18" aria-hidden="true"><rect x="2" y="2" width="6" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" /><rect x="12" y="2" width="6" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" /></svg>
-            </button>
-            <button type="button" class="view-btn" data-columns="3" aria-label="3열 보기" title="3열 보기" aria-pressed="false">
-              <svg viewBox="0 0 20 18" aria-hidden="true"><rect x="1" y="2" width="4" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" /><rect x="8" y="2" width="4" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" /><rect x="15" y="2" width="4" height="14" rx="1" fill="none" stroke="currentColor" stroke-width="1.5" /></svg>
-            </button>
-          </div>
         </div>
       </div>
     </header>

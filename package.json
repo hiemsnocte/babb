@@ -2,7 +2,10 @@
   "name": "bab",
   "private": true,
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "prepare:site": "node scripts/prepare-site.cjs",
+    "test:browser": "node scripts/check-site.cjs",
+    "preview": "node scripts/preview.cjs"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

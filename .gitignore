@@ -3,3 +3,8 @@ node_modules/
 .menu-github-cache/
 .capture-test/
 menu_*.png
+public/data/menus.json
+public/data/weather.json
+public/data/images/
+public/.menu-data-stage-*/
+.preview/
